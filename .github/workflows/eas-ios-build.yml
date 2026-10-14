@@ -37,24 +37,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Restore iOS signing files
-        run: |
-          mkdir -p ios-certs
-          echo "${{ secrets.IOS_DIST_P12_B64 }}" | base64 -d > ios-certs/dist-legacy.p12
-          echo "${{ secrets.IOS_PROVISIONING_PROFILE_B64 }}" | base64 -d > ios-certs/Kamino_App_Store.mobileprovision
-          cat > credentials.json <<EOF
-          {
-            "ios": {
-              "provisioningProfilePath": "./ios-certs/Kamino_App_Store.mobileprovision",
-              "distributionCertificate": {
-                "path": "./ios-certs/dist-legacy.p12",
-                "password": "${{ secrets.IOS_DIST_P12_PASSWORD }}"
-              }
-            }
-          }
-          EOF
-          ls -la ios-certs/
-
       - name: Submit EAS build
         run: |
           eas build --platform ${{ inputs.platform || 'ios' }} --profile production --non-interactive --no-wait
