@@ -15,7 +15,19 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { internals } from "./server";
 
 type Authed = { userId: string };
-type Row = Record<string, unknown>;
+
+/** Serializable story turn shape (mirrors the mobile client's StoryTurn). */
+type StoryTurnOut = {
+  id: number;
+  characterId: string;
+  characterName: string;
+  characterArchetype: string;
+  hue: number;
+  kind: "dialogue" | "narrator" | "director";
+  text: string;
+  directorNote?: string;
+  createdAt: string;
+};
 
 const slugSchema = z.string().min(1).max(128);
 const sceneSchema = z.object({ slug: slugSchema, sceneId: z.number().int().min(0) });
@@ -45,7 +57,8 @@ export const rewindAiStoryCheckpoint = createServerFn({ method: "POST" })
       do update set current_checkpoint_id = ${data.checkpointId}, updated_by = ${userId}, updated_at = now()`;
     // Turns live on the client that authored the checkpoint; the canonical
     // pointer above is what lets other devices follow the rewind.
-    return { ok: true, restoredTurnId: 0, turns: [] as Row[] };
+    const turns: StoryTurnOut[] = [];
+    return { ok: true, restoredTurnId: 0, turns };
   });
 
 /**
@@ -70,7 +83,7 @@ export const voteAiStoryBranch = createServerFn({ method: "POST" })
       await sql`insert into story_votes(community_slug, scene_id, option_id, user_id)
         values(${data.slug}, ${data.sceneId}, ${data.optionId}, ${userId})
         on conflict do nothing`;
-    const rows = await sql<Row>`
+    const rows = await sql<{ option_id: unknown; votes: unknown; voted_by_me: unknown }>`
       select v.option_id,
         count(*) as votes,
         bool_or(v.user_id = ${userId}) as voted_by_me
