@@ -17,7 +17,18 @@ export type ServerEvent =
   | { type: "receipt"; roomId: number; userId: string }
   | { type: "voice"; roomId: number }
   | { type: "call"; toUserId: string; roomId: number }
-  | { type: "call-declined"; toUserId: string; roomId: number };
+  | { type: "call-declined"; toUserId: string; roomId: number }
+  | {
+      type: "watchparty.sync";
+      roomId: number;
+      watchSync: {
+        roomId: number;
+        isPlaying: boolean;
+        positionMs: number;
+        playbackRate: number;
+        updatedAtEpochMs: number;
+      };
+    };
 
 type Listener = (event: ServerEvent) => void;
 

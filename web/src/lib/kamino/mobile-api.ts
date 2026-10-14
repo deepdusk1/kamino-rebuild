@@ -30,6 +30,7 @@ import * as money from "./money";
 import * as ageVerification from "./age-verification";
 import * as livekit from "./livekit";
 import * as gifs from "./gifs";
+import * as story from "./story";
 
 type ServerFn = ((opts: { data?: unknown }) => Promise<unknown>) & { method?: string };
 
@@ -38,6 +39,6 @@ function isServerFn(value: unknown): value is ServerFn {
 }
 
 export const mobileApi: Record<string, ServerFn> = Object.fromEntries(
-  [core, extras, engagement, library, aiFeatures, social, identity, communityTools, contentTools, platformTools, billing, siteReports, platformAnalytics, profileStories, mediaV10, socialEventsV10, operationsV10, searchV10, watch, referrals, money, ageVerification, livekit, gifs]
+  [core, extras, engagement, library, aiFeatures, social, identity, communityTools, contentTools, platformTools, billing, siteReports, platformAnalytics, profileStories, mediaV10, socialEventsV10, operationsV10, searchV10, watch, referrals, money, ageVerification, livekit, gifs, story]
     .flatMap(module => Object.entries(module)).filter(([, value]) => isServerFn(value)),
 );

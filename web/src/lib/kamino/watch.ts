@@ -20,6 +20,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { internals } from "./server";
 import { canModerate } from "./safety";
 import { parseWatchInput } from "./shelf";
+import { publishEvent } from "./events.server";
 
 type Authed = { userId: string };
 type Row = Record<string, unknown>;
@@ -234,4 +235,65 @@ export const listWatchReady = createServerFn({ method: "GET" })
           mine: String(r.user_id) === userId,
         })),
     };
+  });
+
+const syncPlaybackSchema = z.object({
+  roomId: idSchema,
+  isPlaying: z.boolean(),
+  positionMs: z.number().int().min(0).max(24 * 3600 * 1000),
+  playbackRate: z.number().min(0.25).max(4),
+  updatedAtEpochMs: z.number().int().min(0),
+});
+
+/**
+ * Host playback sync: the host's play/pause/seek state is fanned out to every
+ * viewer in the room as a `watchparty.sync` SSE event (see events.server.ts).
+ * Mobile calls this on every play/pause/seek; the payload is tiny and the
+ * event bus is in-process, so no persistence is needed — playback state is
+ * inherently ephemeral.
+ */
+export const syncWatchPartyPlayback = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(syncPlaybackSchema)
+  .handler(async ({ context, data }) => {
+    const sql = await internals.db();
+    const { userId } = context as Authed;
+    const room = await requireScreening(sql, userId, data.roomId);
+    if (!(await watchHost(sql, userId, room)))
+      throw new Error("Only the host can control playback for everyone.");
+    publishEvent({
+      type: "watchparty.sync",
+      roomId: data.roomId,
+      watchSync: {
+        roomId: data.roomId,
+        isPlaying: data.isPlaying,
+        positionMs: data.positionMs,
+        playbackRate: data.playbackRate,
+        updatedAtEpochMs: data.updatedAtEpochMs,
+      },
+    });
+    return { ok: true };
+  });
+
+const kickViewerSchema = z.object({ roomId: idSchema, targetUserId: z.string().min(1).max(128) });
+
+/**
+ * Removes a viewer from the watch party. The kick is recorded durably (see
+ * `watch_kicked_viewers`); the mobile client applies it optimistically and
+ * treats this call as fire-and-forget.
+ */
+export const kickWatchPartyViewer = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator(kickViewerSchema)
+  .handler(async ({ context, data }) => {
+    const sql = await internals.db();
+    const { userId } = context as Authed;
+    if (data.targetUserId === userId) throw new Error("You cannot kick yourself.");
+    const room = await requireScreening(sql, userId, data.roomId);
+    if (!(await watchHost(sql, userId, room)))
+      throw new Error("Only the host can remove viewers.");
+    await sql`insert into watch_kicked_viewers(room_id, user_id, kicked_by)
+      values(${data.roomId}, ${data.targetUserId}, ${userId})
+      on conflict (room_id, user_id) do update set kicked_by = ${userId}, created_at = now()`;
+    return { ok: true };
   });
