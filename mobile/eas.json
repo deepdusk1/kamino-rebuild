@@ -1,0 +1,32 @@
+{
+  "cli": { "version": ">= 16.0.0", "appVersionSource": "remote" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": { "EXPO_PUBLIC_API_URL": "http://YOUR-COMPUTER-IP:8080" }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_API_URL": "https://web-production-597bf.up.railway.app" }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_API_URL": "https://web-production-597bf.up.railway.app" },
+      "ios": {
+        "credentialsSource": "local"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6817777981",
+        "ascApiKeyId": "PUTB947VXJ",
+        "ascApiKeyIssuerId": "ce7245b8-82c1-4231-8a20-9bb10aea4f6e",
+        "ascApiKeyPath": "./AuthKey.p8"
+      }
+    }
+  }
+}

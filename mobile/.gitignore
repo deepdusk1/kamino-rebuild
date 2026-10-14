@@ -1,0 +1,13 @@
+node_modules/
+.expo/
+dist/
+.export-check/
+*.log
+.env
+.env.local
+ios/
+android/
+*.jks
+*.p8
+*.p12
+*.mobileprovision

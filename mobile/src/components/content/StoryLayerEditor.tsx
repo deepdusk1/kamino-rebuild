@@ -1,0 +1,33 @@
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { PanResponder, Pressable, View, type GestureResponderEvent, type PanResponderGestureState } from "react-native";
+import { router } from "expo-router";
+import { Button, Field, Txt, Chip } from "@/components/ui";
+import type { StoryLayer } from "@/api/media-v10-types";
+const STICKERS=["✨","💜","🎉","🔥","🌈","🌙","⭐","🎵","☀️","💡","👏","🌸"];
+const clamp=(value:number)=>Math.min(95,Math.max(5,value));
+function Layer({layer,onChange,onSelect,selected=false,width,height}:{layer:StoryLayer;onChange?:(layer:StoryLayer)=>void;onSelect?:()=>void;selected?:boolean;width:number;height:number}){
+  const current=useRef({layer,onChange,onSelect});
+  useLayoutEffect(()=>{current.current={layer,onChange,onSelect};},[layer,onChange,onSelect]);
+  const start=useRef({x:0,y:0}),[size,setSize]=useState({width:0,height:0});
+  const grant=useCallback(()=>{start.current={x:current.current.layer.x,y:current.current.layer.y};current.current.onSelect?.();},[]);
+  const move=useCallback((_:GestureResponderEvent,gesture:PanResponderGestureState)=>current.current.onChange?.({...current.current.layer,x:clamp(start.current.x+gesture.dx/width*100),y:clamp(start.current.y+gesture.dy/height*100)}),[width,height]);
+  // PanResponder stores these callbacks; refs are read only by later gesture events.
+  // eslint-disable-next-line react-hooks/refs
+  const responder=useMemo(()=>PanResponder.create({onStartShouldSetPanResponder:()=>true,onMoveShouldSetPanResponder:()=>true,onPanResponderGrant:grant,onPanResponderMove:move}),[grant,move]);
+  return <View pointerEvents={!onChange&&layer.kind!=="mention"?"none":"auto"} {...(onChange?responder.panHandlers:{})} onLayout={event=>setSize(event.nativeEvent.layout)} style={{position:"absolute",left:`${layer.x}%`,top:`${layer.y}%`,maxWidth:"80%",padding:8,borderRadius:10,backgroundColor:layer.backdrop?"rgba(0,0,0,.65)":"transparent",borderWidth:selected?2:0,borderColor:"#fff",transform:[{translateX:-size.width/2},{translateY:-size.height/2},{rotate:`${layer.rotation}deg`},{scale:layer.scale}]}}>
+    <Pressable onPress={()=>onSelect?onSelect():layer.kind==="mention"?router.push(`/u/${layer.text}`):undefined} disabled={!onSelect&&layer.kind!=="mention"} accessibilityRole={onSelect||layer.kind==="mention"?"button":undefined} accessibilityLabel={`${layer.kind}: ${layer.text}`}><Txt style={{color:layer.color,fontSize:layer.kind==="sticker"?36:20,textAlign:"center",fontWeight:"700"}}>{layer.kind==="mention"?`@${layer.text}`:layer.text}</Txt></Pressable>
+  </View>;
+}
+export function StoryLayers({layers}:{layers:StoryLayer[]}){const[size,setSize]=useState({width:280,height:498});return <View pointerEvents="box-none" onLayout={e=>setSize(e.nativeEvent.layout)} style={{position:"absolute",inset:0,overflow:"hidden"}}>{layers.map(layer=><Layer key={layer.id} layer={layer} width={size.width} height={size.height}/>)}</View>;}
+export function StoryLayerEditor({layers,onChange,background}:{layers:StoryLayer[];onChange:(layers:StoryLayer[])=>void;background:string}){
+  const [selected,setSelected]=useState<string|null>(null),[size,setSize]=useState({width:280,height:498}),layer=layers.find(l=>l.id===selected);
+  function patch(change:Partial<StoryLayer>){if(layer)onChange(layers.map(l=>l.id===layer.id?{...l,...change}:l));}
+  function add(kind:StoryLayer["kind"]){let serial=1;while(layers.some(l=>l.id===`layer-${serial}`))serial++;const next:StoryLayer={id:`layer-${serial}`,kind,text:kind==="sticker"?"✨":kind==="mention"?"member":"Your words",x:50,y:50,scale:1,rotation:0,color:"#ffffff",backdrop:true};onChange([...layers,next]);setSelected(next.id);}
+  return <View style={{gap:12}}><Txt variant="heading">Arrange story layers</Txt><Txt variant="small" tone="muted">Drag text, stickers and mentions. You can also use the position controls.</Txt><View style={{flexDirection:"row",flexWrap:"wrap",gap:8}}>{(["text","sticker","mention"] as const).map(kind=><Button small key={kind} label={`Add ${kind}`} disabled={layers.length>=12} onPress={()=>add(kind)}/>)}</View>
+    <View onLayout={e=>setSize(e.nativeEvent.layout)} style={{width:"100%",maxWidth:280,aspectRatio:9/16,alignSelf:"center",backgroundColor:background,borderRadius:16,overflow:"hidden"}}>{layers.map(l=><Layer key={l.id} layer={l} selected={selected===l.id} width={size.width} height={size.height} onSelect={()=>setSelected(l.id)} onChange={changed=>onChange(layers.map(item=>item.id===changed.id?changed:item))}/>)}</View>
+    {layer?<><Txt variant="small">Selected {layer.kind}</Txt>{layer.kind==="sticker"?<View style={{flexDirection:"row",flexWrap:"wrap",gap:8}}>{STICKERS.map(text=><Chip key={text} label={text} selected={text===layer.text} onPress={()=>patch({text})}/>)}</View>:<Field label={layer.kind==="mention"?"Member handle":"Layer text"} value={layer.text} maxLength={layer.kind==="mention"?30:200} onChangeText={text=>patch({text:layer.kind==="mention"?text.replace(/^@/,""):text})}/>}
+    <View style={{flexDirection:"row",flexWrap:"wrap",gap:8}}>{[{label:"←",change:{x:clamp(layer.x-5)}},{label:"→",change:{x:clamp(layer.x+5)}},{label:"↑",change:{y:clamp(layer.y-5)}},{label:"↓",change:{y:clamp(layer.y+5)}}].map(({label,change})=><Button small key={label} label={label} onPress={()=>patch(change)} variant="secondary"/>)}</View><Txt variant="small">Position: {Math.round(layer.x)}%, {Math.round(layer.y)}% · Size {layer.scale.toFixed(1)} · Rotation {layer.rotation}°</Txt>
+    <View style={{flexDirection:"row",flexWrap:"wrap",gap:8}}><Button small label="Smaller" onPress={()=>patch({scale:Math.max(.5,Math.round((layer.scale-.1)*10)/10)})}/><Button small label="Larger" onPress={()=>patch({scale:Math.min(2.5,Math.round((layer.scale+.1)*10)/10)})}/><Button small label="Rotate left" onPress={()=>patch({rotation:Math.max(-180,layer.rotation-15)})}/><Button small label="Rotate right" onPress={()=>patch({rotation:Math.min(180,layer.rotation+15)})}/></View>
+    <View style={{flexDirection:"row",flexWrap:"wrap",gap:8}}>{["#ffffff","#ffdd55","#ff77aa","#88eeff","#99ee99","#161622"].map(color=><Chip key={color} label={color} selected={layer.color===color} onPress={()=>patch({color})}/>)}</View><Button small variant="secondary" label={layer.backdrop?"Remove background":"Add readable background"} onPress={()=>patch({backdrop:!layer.backdrop})}/><Button small variant="secondary" label="Bring to front" onPress={()=>onChange([...layers.filter(l=>l.id!==layer.id),layer])}/><Button small variant="danger" label="Remove layer" onPress={()=>{onChange(layers.filter(l=>l.id!==layer.id));setSelected(null);}}/></>:null}
+  </View>;
+}

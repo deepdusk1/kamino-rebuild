@@ -1,0 +1,53 @@
+# One-click hosting on Render (https://render.com).
+# In Render: New → Blueprint → pick the repository that contains this Kamino folder → Apply.
+# Render then creates the database and the server, and gives you a public https address.
+#
+# NOTE ON COST / LIMITS (checked against Render's docs, Sept 2026):
+#   - A "free" database is deleted 30 days after creation unless you upgrade it. Fine for a first
+#     test; before real users arrive, change `plan: free` on the database to a paid plan.
+#   - A "free" web service sleeps after 15 minutes without visitors; the first request afterwards
+#     takes about a minute. Upgrade the web plan when you want it always-on.
+services:
+  - type: web
+    name: kamino
+    runtime: node
+    rootDir: web
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: kamino-db
+          property: connectionString
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      - key: VITE_AUTH_ENABLED
+        value: "true"
+      # Start with an empty site instead of the built-in sample communities and made-up members.
+      # Delete this line if you would like the sample content for a demo.
+      - key: KAMINO_SAMPLE_CONTENT
+        value: "off"
+      # Optional, but needed for "forgot password" emails (create a free key at resend.com):
+      # - key: RESEND_API_KEY
+      #   sync: false
+      # - key: MAIL_FROM
+      #   value: Kamino <hello@your-domain.example>
+      # Optional, free AI (see DEPLOY.md, step 4b). Paste the keys in Render's dashboard, not in this file.
+      - key: KAMINO_MODERATION_API_KEY
+        sync: false
+      - key: KAMINO_AI_API_KEY
+        sync: false
+      - key: KAMINO_ADMIN_EMAILS
+        sync: false
+      # Optional, for voice/video behind strict networks (a TURN relay you provision):
+      # - key: KAMINO_TURN_URLS
+      #   value: turn:turn.example.com:3478
+      # - key: KAMINO_TURN_SECRET
+      #   sync: false
+databases:
+  - name: kamino-db
+    plan: free

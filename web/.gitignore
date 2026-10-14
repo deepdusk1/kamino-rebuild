@@ -1,0 +1,8 @@
+node_modules
+.output
+.local-data
+.local-secret
+.tanstack
+*.log
+.env
+.contract

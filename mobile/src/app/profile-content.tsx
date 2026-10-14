@@ -1,0 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
+import { router, useLocalSearchParams } from "expo-router";
+import * as Linking from "expo-linking";
+import { useState } from "react";
+import { View } from "react-native";
+import { api } from "@/api/endpoints";
+import { AppHeader } from "@/components/k";
+import { Screen, Card, Button, Txt, Loading, ErrorState } from "@/components/ui";
+import { PostContentTools } from "@/components/content/PostContentTools";
+import { contentApi } from "@/lib/content-v9";
+export default function ProfileContent(){const {userId}=useLocalSearchParams<{userId:string}>(),me=useQuery({queryKey:["me"],queryFn:api.me}),owner=userId||me.data?.profile.userId,[story,setStory]=useState<number|null>(null),q=useQuery({queryKey:["profileContent",owner],queryFn:()=>contentApi.profile(owner!),enabled:!!owner});if(q.isPending)return <Loading/>;if(q.error)return <ErrorState error={q.error} onRetry={()=>void q.refetch()}/>;const d=q.data!;return <View style={{flex:1}}><AppHeader back/><Screen><Txt variant="screen">Stories, media & portfolio</Txt>{d.highlights.length?<><Txt variant="heading">Story highlights</Txt>{d.highlights.map(h=><Card key={h.id}><View style={{gap:8}}><Txt variant="heading">🌈 {h.title}</Txt>{h.postIds.map((id,i)=><Button key={id} small variant="secondary" label={`Story ${i+1}`} onPress={()=>setStory(id)}/>)}</View></Card>)}</>:null}{story?<><Button variant="ghost" label="Close story" onPress={()=>setStory(null)}/><PostContentTools postId={story} story/></>:null}<Txt variant="heading">Portfolio</Txt>{d.portfolio.length?d.portfolio.map(p=><Card key={p.id}><View style={{gap:10}}><Txt variant="heading">{p.title}</Txt><Txt>{p.description}</Txt>{p.url?<Button small variant="secondary" label="View project" onPress={()=>void Linking.openURL(p.url)}/>:null}</View></Card>):<Txt tone="muted">No projects shared yet.</Txt>}<Txt variant="heading">Media & stories</Txt>{d.media.map(p=><Button key={p.id} variant="secondary" label={`${p.type==="story"?"🌈":"🎨"} ${p.title}`} onPress={()=>p.type==="story"?setStory(p.id):router.push(`/community/${p.slug}/post/${p.id}`)}/>) }{d.mine?<Button label="Edit stories & portfolio" onPress={()=>router.push("/content-studio")}/>:null}</Screen></View>;}

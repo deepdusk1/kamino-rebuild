@@ -1,0 +1,9 @@
+import { createFileRoute } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { getCommunityInviteDetails } from '@/lib/kamino/community-v9';
+import { joinCommunity } from '@/lib/kamino/server';
+import { useCurrentUserState } from '@/lib/auth/use-current-user';
+export const Route=createFileRoute('/invite/$code')({component:Invite});
+function Invite(){const {code}=Route.useParams(),{user}=useCurrentUserState();const [error,setError]=useState(''),[busy,setBusy]=useState(false);const q=useQuery({queryKey:['invite',code],queryFn:()=>getCommunityInviteDetails({data:code})});return <main className="mx-auto max-w-lg space-y-4 px-4 py-12"><h1 className="font-display text-2xl font-extrabold">You’re invited</h1>{q.error?<p role="alert" className="text-danger">{(q.error as Error).message}</p>:q.data?<section className="space-y-4 rounded-2xl bg-surface p-5 shadow-border"><h2 className="text-xl font-bold">{q.data.name}</h2><p className="text-muted">{q.data.tagline}</p><p className="text-sm text-subtle">For members age {q.data.ageGate} and over</p>{error?<p role="alert" className="text-danger">{error}</p>:null}{q.data.joined?<a className="font-semibold text-accent" href={`/c/${q.data.slug}`}>Open community →</a>:user?<Button disabled={busy} onClick={()=>{setBusy(true);setError('');void joinCommunity({data:{slug:q.data!.slug,invite:code}}).then(()=>q.refetch()).catch(e=>setError(e instanceof Error?e.message:'Could not join')).finally(()=>setBusy(false));}}>Accept invitation</Button>:<a className="font-semibold text-accent" href={`/login?redirect=${encodeURIComponent(`/invite/${code}`)}`}>Sign in to join</a>}</section>:<p className="text-muted">Checking your invitation…</p>}</main>;}

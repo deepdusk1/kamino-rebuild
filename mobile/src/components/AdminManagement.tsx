@@ -1,0 +1,31 @@
+import {useState} from 'react';
+import {useQuery} from '@tanstack/react-query';
+import {View} from 'react-native';
+import {platform,type Admin,type Row} from '@/api/platform-v9';
+import {Button,Field,Txt} from '@/components/ui';
+import {notify} from '@/components/community/platform';
+import {errorMessage} from '@/lib/errors';
+import {radius,useTheme} from '@/theme';
+
+export function AdminManagement({data,refresh}:{data:Admin;refresh:()=>void}){
+  const theme=useTheme(),[busy,setBusy]=useState(false);
+  const [search,setSearch]=useState(''),[reason,setReason]=useState('');
+  const [categoryKey,setCategoryKey]=useState(''),[categoryName,setCategoryName]=useState(''),[icon,setIcon]=useState('✨');
+  const [campaignTitle,setCampaignTitle]=useState(''),[campaignBody,setCampaignBody]=useState(''),[campaignHref,setCampaignHref]=useState('/');
+  const [preview,setPreview]=useState(false);
+  const accounts=useQuery({queryKey:['adminAccounts',search],queryFn:()=>platform.accounts(search),enabled:search.trim().length>1});
+  const run=async(work:()=>Promise<unknown>)=>{setBusy(true);try{await work();refresh();await accounts.refetch();}catch(e){notify('Could not save',errorMessage(e));}finally{setBusy(false);}};
+  const box={gap:12,padding:16,borderRadius:radius.card,backgroundColor:theme.surface,borderWidth:1,borderColor:theme.border} as const;
+  return <>
+    <View style={box}><Txt variant="heading">Verification requests</Txt>{!data.verification.length?<Txt tone="muted">No pending requests.</Txt>:null}{data.verification.map(v=><View key={String(v.id)} style={{gap:8}}><Txt>{String(v.target_type)} · {String(v.target_id)}</Txt><Txt>{String(v.reason)}</Txt><View style={{flexDirection:'row',gap:8}}><Button label="Approve" small busy={busy} onPress={()=>void run(()=>platform.verification(Number(v.id),true,'Approved after review'))}/><Button label="Decline" small variant="secondary" busy={busy} onPress={()=>void run(()=>platform.verification(Number(v.id),false,'Please provide more detail'))}/></View></View>)}</View>
+    <View style={box}><Txt variant="heading">Member management</Txt><Field label="Find by username or name" value={search} onChangeText={setSearch}/><Field label="Reason for status change" value={reason} onChangeText={setReason} multiline maxLength={500}/>{accounts.error?<Txt tone="muted">{errorMessage(accounts.error)}</Txt>:null}{accounts.data?.map(p=><View key={p.userId} style={{gap:8}}><Txt>{p.name} · @{p.handle}</Txt><Txt tone="muted">{p.status} · {p.emailVerified?'Email verified':'Email unverified'}</Txt><View style={{flexDirection:'row',flexWrap:'wrap',gap:8}}>{(['active','suspended','banned'] as const).map(status=><Button key={status} label={status==='active'?'Restore':status==='suspended'?'Suspend 7 days':'Ban'} small variant={status==='active'?'secondary':'danger'} disabled={reason.trim().length<5} busy={busy} onPress={()=>void run(()=>platform.accountStatus(p.userId,status,reason))}/>)}</View></View>)}</View>
+    <View style={box}><Txt variant="heading">Community management</Txt>{data.communities.slice(0,20).map(c=><CommunityEditor key={String(c.id)} row={c} run={run} busy={busy}/>)}</View>
+    <View style={box}><Txt variant="heading">Featured creators</Txt>{data.creators.slice(0,30).map(c=><View key={String(c.user_id)} style={{gap:8}}><Txt>{String(c.display_name)} · {Number(c.followers)} followers</Txt><Button label={c.featured_creator?'Remove feature':'Feature creator'} small busy={busy} variant="secondary" onPress={()=>void run(()=>platform.featureCreator(String(c.user_id),!c.featured_creator))}/></View>)}</View>
+    <View style={box}><Txt variant="heading">Categories</Txt><Field label="Category key" value={categoryKey} onChangeText={setCategoryKey} autoCapitalize="none"/><Field label="Label" value={categoryName} onChangeText={setCategoryName}/><Field label="Icon" value={icon} onChangeText={setIcon} maxLength={8}/><Button label="Save category" busy={busy} disabled={categoryName.trim().length<2} onPress={()=>void run(()=>platform.saveCategory(categoryKey,categoryName,icon,true))}/>{data.taxonomy.map(t=><Button key={String(t.key)} small variant="secondary" label={`${t.label} · ${t.active?'Deactivate':'Activate'}`} busy={busy} onPress={()=>void run(()=>platform.saveCategory(String(t.key),String(t.label),String(t.icon),!t.active))}/>)}</View>
+    <View style={box}><Txt variant="heading">Notification campaign</Txt><Txt tone="muted">Goes to members who enabled community notifications. Quiet hours apply to push alerts.</Txt><Field label="Title" value={campaignTitle} onChangeText={setCampaignTitle} maxLength={80}/><Field label="Message" value={campaignBody} onChangeText={setCampaignBody} maxLength={160} multiline/><Field label="App link" value={campaignHref} onChangeText={setCampaignHref} autoCapitalize="none"/><Button label="Preview campaign" variant="secondary" disabled={campaignTitle.trim().length<3||campaignBody.trim().length<3} onPress={()=>setPreview(true)}/>{preview?<View style={{gap:10}}><Txt variant="cardTitle">{campaignTitle}</Txt><Txt>{campaignBody}</Txt><Txt tone="muted">{campaignHref}</Txt><Button label="Publish this campaign" busy={busy} onPress={()=>void run(async()=>{await platform.campaign(campaignTitle,campaignBody,campaignHref);setPreview(false);setCampaignTitle('');setCampaignBody('');})}/></View>:null}</View>
+  </>;
+}
+function CommunityEditor({row,run,busy}:{row:Row;run:(work:()=>Promise<unknown>)=>Promise<void>;busy:boolean}){
+  const [category,setCategory]=useState(String(row.category)),[language,setLanguage]=useState(String(row.language));
+  return <View style={{gap:8}}><Txt variant="cardTitle">{String(row.name)}</Txt><Txt tone="muted">{Number(row.member_count)} members · {Number(row.new_members)} new · {Number(row.reports)} reports</Txt><Field label="Category" value={category} onChangeText={setCategory}/><Field label="Language code" value={language} onChangeText={setLanguage} autoCapitalize="none"/><View style={{flexDirection:'row',gap:8}}><Button small label="Save" busy={busy} onPress={()=>void run(()=>platform.manageCommunity(String(row.id),category,language,Boolean(row.verified)))}/><Button small variant="secondary" busy={busy} label={row.verified?'Remove verification':'Verify'} onPress={()=>void run(()=>platform.manageCommunity(String(row.id),category,language,!row.verified))}/></View></View>;
+}
