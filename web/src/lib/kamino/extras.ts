@@ -244,10 +244,8 @@ export const resolveAppeal = createServerFn({ method: "POST" })
         await sql`delete from strikes where id in (
           select id from strikes where community_id = ${data.slug} and user_id = ${appeal.user_id}
           order by id desc offset 2)`;
-        const restored = await sql`update memberships set status = 'active'
-          where user_id = ${appeal.user_id} and community_id = ${data.slug} and status = 'banned' returning user_id`;
-        if (restored.length)
-          await sql`update communities set member_count = member_count + 1 where id = ${data.slug}`;
+        // Reinstated with their rooms back (a ban took them out of every room).
+        await internals.restoreMember(sql, appeal.user_id, data.slug);
       }
     }
     await sql`update appeals set status = ${data.decision}, decided_by = ${userId},

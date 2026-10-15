@@ -14,6 +14,7 @@ import { rpc } from "@/api/client";
 import { SUPPORT_EMAIL } from "@/api/config";
 import { api } from "@/api/endpoints";
 import type { ProfileOverview, PublicProfile } from "@/api/models";
+import { toggleFollowWithConfirm } from "@/lib/follow";
 import { platform } from "@/api/platform-v9";
 import type { CommunityCardData } from "@/api/types";
 import { useSession } from "@/auth/session";
@@ -243,33 +244,10 @@ export function ProfileScreen({ handle, inTabs }: Props) {
     avatarV: p.avatarVersion,
   };
 
+  // Asks before unfollowing / cancelling; every other screen showing this person updates too (src/lib/follow.ts).
   const follow = () =>
     run("follow", async () => {
-      if (d.following || d.requested) {
-        const ok = await confirmAction(
-          d.following ? `Unfollow ${p.displayName}?` : "Cancel your request?",
-          d.following
-            ? "Their posts won't show in your Following feed any more."
-            : "You can ask again any time.",
-          d.following ? "Unfollow" : "Cancel request",
-          true,
-        );
-        if (!ok) return;
-      }
-      const result = await api.followProfile(p.userId);
-      queryClient.setQueryData<ProfileOverview>(
-        ["profileOverview", handle],
-        (prev) =>
-          prev
-            ? {
-                ...prev,
-                following: result.following,
-                requested: result.requested,
-              }
-            : prev,
-      );
-      await refresh();
-      void queryClient.invalidateQueries({ queryKey: ["homeOverview"] });
+      await toggleFollowWithConfirm(queryClient, { userId: p.userId, name: p.displayName || p.handle }, { following: d.following, requested: d.requested });
     });
 
   const message = () =>

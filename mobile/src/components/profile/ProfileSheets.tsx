@@ -11,6 +11,7 @@ import { EmptyHint, GradientButton, PersonAvatar, PostTile, TabsUnderline, Verif
 import { ErrorState, Loading, PressableScale, Txt } from "@/components/ui";
 import { byCategory, toggleShowcase } from "@/lib/achievements";
 import { showError } from "@/lib/errors";
+import { setFollow, wantsFollow } from "@/lib/follow";
 import { compactNumber, plainPreview } from "@/lib/format";
 import { font, radius, shadow, useTheme } from "@/theme";
 import { FullSheet } from "./FullSheet";
@@ -32,9 +33,8 @@ export function FollowListSheet({ handle, kind, onKind, onClose, viewerId }: { h
   const toggle = async (person: PersonRow) => {
     setBusy(person.userId);
     try {
-      await api.followProfile(person.userId);
-      await queryClient.invalidateQueries({ queryKey: ["followLists", handle] });
-      void queryClient.invalidateQueries({ queryKey: ["profileOverview"] });
+      // Says what it wants (follow / stop), so an out-of-date row can never flip the wrong way.
+      await setFollow(queryClient, person.userId, wantsFollow(person));
     } catch (error) {
       showError(error);
     } finally {

@@ -140,7 +140,9 @@ function Compose() {
     if (problem) throw new Error(problem);
     while (savingRef.current) await new Promise((resolve) => setTimeout(resolve, 100)); // never race an autosave
     publishedRef.current = true;
-    const created = await api.createPost({
+    let created: Awaited<ReturnType<typeof api.createPost>>;
+    try {
+      created = await api.createPost({
       slug: slug!,
       type: content.type,
       title: content.title.trim(),
@@ -152,7 +154,12 @@ function Compose() {
       contentWarning: content.warning.trim() || undefined,
       commentsDisabled: content.commentsOff || undefined,
       announcement: isLeader && content.announce ? true : undefined,
-    });
+      });
+    } catch (error) {
+      // Not published (for example a blocked phrase or the posting policy): keep autosaving the draft.
+      publishedRef.current = false;
+      throw error;
+    }
     // The draft has done its job. If deleting it fails the post is still published, so ignore that error.
     if (draftRef.current) await api.deleteDraft(draftRef.current.id, draftRef.current.revision).catch(() => undefined);
     await queryClient.invalidateQueries();

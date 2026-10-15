@@ -5,7 +5,7 @@ import { authMiddleware } from '@/lib/auth/middleware';
 import { internals } from './server';
 import { optionalAuth, type Viewer } from './optional-auth';
 import { canLead, canModerate, scanText } from './safety';
-import { asBool, iso, mapHallEvent, parseJson } from './map';
+import { asBool, iso, mapHallEvent, mapMembership, parseJson } from './map';
 import { guard } from './guard';
 import { paidResourceAccessSql } from './billing-policy';
 import { assertPaidResourceAccess } from './billing.server';
@@ -155,6 +155,48 @@ export const appointCommunityLeader=createServerFn({method:'POST'}).middleware([
   if((target.role==='leader'||data.role==='leader')&&me.role!=='agent')throw new Error('Only the community owner appoints co-leaders.');
   await sql`update memberships set role=${data.role} where user_id=${data.userId} and community_id=${data.slug} and status='active'`;
   await audit(sql,data.slug,uid,'member:role',`${data.userId}; ${data.role}`);return {ok:true};
+});
+
+/** Hands the community to a co-leader. The old owner stays on as a co-leader (and may then leave). */
+const transferSchema=z.object({slug:slugSchema,userId:z.string().min(1).max(100)});
+export const transferCommunityOwnership=createServerFn({method:'POST'}).middleware([authMiddleware]).validator((d:z.infer<typeof transferSchema>)=>transferSchema.parse(d)).handler(async({context,data})=>{
+  const sql=await db(),uid=(context as Authed).userId;
+  const me=await requireActiveMember(sql,uid,data.slug);
+  if(me.role!=='agent')throw new Error('Only the community owner can hand it over.');
+  if(data.userId===uid)throw new Error('You already own this community.');
+  const target=await membershipOf(sql,data.userId,data.slug);
+  if(target?.status!=='active'||target.role!=='leader')throw new Error('Make them a co-leader first, then hand over ownership.');
+  await internals.requireMinAge(sql,data.userId);
+  if(!sql.transaction)throw new Error('Transactional storage is required.');
+  await sql.transaction(async tx=>{
+    // Both rows change together, so the community never has zero or two owners.
+    const moved=await tx`update memberships set role='agent' where user_id=${data.userId} and community_id=${data.slug} and status='active' and role='leader' returning user_id`;
+    if(!moved.length)throw new Error('Make them a co-leader first, then hand over ownership.');
+    await tx`update memberships set role='leader' where user_id=${uid} and community_id=${data.slug} and role='agent'`;
+    await tx`update communities set created_by=${data.userId} where id=${data.slug}`;
+    await audit(tx,data.slug,uid,'community:owner',data.userId);
+  });
+  await notify(sql,data.userId,'role','You own this community now',`You were made the owner of ${(await internals.requireCommunity(sql,data.slug)).name}.`,`/c/${data.slug}`,{actorId:uid,targetType:'community',targetId:data.slug});
+  return {ok:true};
+});
+
+/**
+ * Active members, a page at a time, with an optional search by nickname or @username. Used by the members screen and
+ * the moderators' People tab, so everyone can be found (not just the 80 most active members on the community page).
+ */
+const memberListSchema=z.object({slug:slugSchema,q:z.string().trim().max(40).default(''),offset:z.number().int().min(0).max(100_000).default(0)});
+const MEMBER_PAGE=50;
+export const listCommunityMembers=createServerFn({method:'GET'}).middleware([optionalAuth]).validator((d:z.input<typeof memberListSchema>)=>memberListSchema.parse(d)).handler(async({context,data})=>{
+  const sql=await db(),uid=(context as unknown as Viewer).userId;await readable(sql,uid,data.slug);
+  const term=data.q.replace(/^@/,'').toLowerCase().replace(/[%_\\]/g,'');
+  const like=`%${term}%`;
+  const rows=await sql`select m.*,pr.handle,pr.avatar_version from memberships m left join profiles pr on pr.user_id=m.user_id
+    where m.community_id=${data.slug} and m.status='active' and (${term}='' or lower(m.nickname) like ${like} or lower(coalesce(pr.handle,'')) like ${like})
+    order by case m.role when 'agent' then 0 when 'leader' then 1 when 'curator' then 2 else 3 end,m.rep desc,m.joined_at,m.user_id
+    offset ${data.offset} limit ${MEMBER_PAGE+1}`;
+  const blocked=await internals.blockedSet(sql,uid);
+  const members=rows.slice(0,MEMBER_PAGE).filter(r=>!blocked.has(String(r.user_id))).map(mapMembership);
+  return {members,next:rows.length>MEMBER_PAGE?data.offset+MEMBER_PAGE:null};
 });
 
 export const getCommunityModerationDetails=createServerFn({method:'GET'}).middleware([authMiddleware]).validator((slug:string)=>slugSchema.parse(slug)).handler(async({context,data:slug})=>{

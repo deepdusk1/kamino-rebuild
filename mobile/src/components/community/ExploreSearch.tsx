@@ -14,11 +14,11 @@ import { PressableScale, Sheet, SkeletonList, Txt } from "@/components/ui";
 import { defaultCover } from "@/lib/brandArt";
 import { showError } from "@/lib/errors";
 import { compactNumber, timeAgo } from "@/lib/format";
-import { haptic } from "@/lib/haptics";
+import { tapJoinButton, joinButtonLabel } from "@/lib/community-join";
+import { followLabel, setFollow, wantsFollow, type FollowState } from "@/lib/follow";
 import { font, radius, shadow, useTheme } from "@/theme";
 import { DEFAULT_FILTERS, LANGUAGE_OPTIONS, SIZE_OPTIONS, SORT_OPTIONS, cleanTag, tagLabel, type SearchFilters } from "./helpers";
 import { serverImage } from "./media";
-import { notify } from "./platform";
 
 export type ResultTab = "people" | "communities" | "posts" | "tags" | "rooms" | "events";
 
@@ -136,8 +136,8 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
     setPicked(null);
   }
   const [joined, setJoined] = useState<Record<string, boolean>>({});
-  const [following, setFollowing] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const queryClient = useQueryClient();
 
   const input = { q: term, kind: "all" as const, category: filters.category || undefined, sort: filters.sort, minMembers: filters.minMembers || undefined, language: filters.language || undefined, safe: filters.safe || undefined };
   const results = useQuery({ queryKey: ["searchEverything", input], queryFn: () => api.searchEverything(input) });
@@ -146,16 +146,11 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
 
   async function toggleJoin(c: CommunityCardData) {
     const isIn = joined[c.id] ?? c.joined;
-    if (!isIn && c.visibility === "private") return router.push(`/community/${c.id}`);
     setBusy(c.id);
     try {
-      if (isIn) await api.leave(c.id);
-      else {
-        const res = await api.join({ slug: c.id });
-        if (res.pending) return notify("Request sent", "The leaders will review your request.");
-        haptic.success();
-      }
-      setJoined((m) => ({ ...m, [c.id]: !isIn }));
+      // Leaving asks first; private, approval and invite-only communities open their page (join questions, invites).
+      const next = await tapJoinButton(queryClient, { ...c, joined: isIn });
+      if (next !== null) setJoined((m) => ({ ...m, [c.id]: next }));
     } catch (error) {
       showError(error);
     } finally {
@@ -163,13 +158,11 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
     }
   }
 
-  async function toggleFollow(userId: string, was: boolean) {
-    setBusy(userId);
+  async function toggleFollow(person: FollowState & { userId: string }) {
+    setBusy(person.userId);
     try {
-      const res = await api.followProfile(userId);
-      setFollowing((m) => ({ ...m, [userId]: res.following }));
-      if (res.requested) notify("Request sent", "This account is private. You'll see their posts once they accept.");
-      else if (!was) haptic.success();
+      // Updates these results (they are cached) and every other screen showing this person.
+      await setFollow(queryClient, person.userId, wantsFollow(person));
     } catch (error) {
       showError(error);
     } finally {
@@ -196,7 +189,7 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
           ))
         ) : tab === "people" ? (
           r.people.map((p, i) => {
-            const isFollowing = following[p.userId] ?? p.following;
+            const isFollowing = p.following || p.requested;
             return (
               <ResultRow key={p.userId} onPress={() => router.push(`/profile/${p.handle}`)} label={`${p.displayName}, @${p.handle}`}>
                 <PersonAvatar person={{ name: p.displayName, hue: p.avatarHue, userId: p.userId, avatarV: p.avatarV }} size={48} online={p.online} />
@@ -208,7 +201,7 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
                   <Txt numberOfLines={1} style={{ fontFamily: font.regular, fontSize: 12.5, color: theme.muted }}>@{p.handle}{p.headline ? ` · ${p.headline}` : ""}</Txt>
                   <Txt style={{ fontFamily: font.regular, fontSize: 11.5, color: theme.subtle }}>{compactNumber(p.followers)} followers{p.followsYou ? " · Follows you" : ""}</Txt>
                 </View>
-                <JoinButton joined={isFollowing} index={i} label="Follow" joinedLabel="Following" size="md" busy={busy === p.userId} onPress={() => void toggleFollow(p.userId, isFollowing)} accessibilityLabel={isFollowing ? `Unfollow ${p.displayName}` : `Follow ${p.displayName}`} />
+                <JoinButton joined={isFollowing} index={i} label="Follow" joinedLabel={followLabel(p)} size="md" busy={busy === p.userId} onPress={() => void toggleFollow(p)} accessibilityLabel={p.following ? `Unfollow ${p.displayName}` : p.requested ? `Cancel your request to ${p.displayName}` : `Follow ${p.displayName}`} />
               </ResultRow>
             );
           })
@@ -255,7 +248,7 @@ export function CommunityResult({ c, index, joined, busy, onJoin }: { c: Communi
           <Txt style={{ fontFamily: font.semibold, fontSize: 11.5, color: theme.subtle }}>{compactNumber(c.memberCount)} members · {c.category}</Txt>
         </View>
       </View>
-      <JoinButton joined={joined} index={index} size="md" busy={busy} onPress={onJoin} accessibilityLabel={joined ? `Leave ${c.name}` : `Join ${c.name}`} />
+      <JoinButton joined={joined || !!c.pending} check={joined} index={index} label={joinButtonLabel({ ...c, joined })} joinedLabel={joinButtonLabel({ ...c, joined })} size="md" busy={busy} onPress={onJoin} accessibilityLabel={joined ? `Leave ${c.name}` : c.pending ? `Your request to join ${c.name}` : `Join ${c.name}`} />
     </ResultRow>
   );
 }

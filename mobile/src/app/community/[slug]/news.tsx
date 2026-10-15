@@ -4,6 +4,7 @@ import { FlatList, Linking } from "react-native";
 import { api } from "@/api/endpoints";
 import { Card, EmptyState, ErrorState, Loading, Txt } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
+import { isWebLink } from "@/lib/hrefs";
 import { space } from "@/theme";
 import { withCommunityTheme } from "@/components/CommunityTheme";
 
@@ -23,7 +24,7 @@ function News() {
       refreshing={news.isRefetching}
       onRefresh={() => void news.refetch()}
       renderItem={({ item }) => (
-        <Card onPress={() => void Linking.openURL(item.link)} accessibilityLabel={`Open article: ${item.title}`}>
+        <Card onPress={isWebLink(item.link) ? () => void Linking.openURL(item.link.trim()).catch(() => undefined) : undefined} accessibilityLabel={`Open article: ${item.title}`}>
           <Txt variant="caption" tone="accent">{item.source}{item.publishedAt ? ` · ${timeAgo(item.publishedAt)}` : ""}</Txt>
           <Txt variant="heading">{item.title}</Txt>
         </Card>

@@ -116,6 +116,7 @@ async function viewerContext(sql: Sql, userId: string | null) {
       userId,
       joined: new Set<string>(),
       banned: new Set<string>(),
+      pending: new Set<string>(),
       blocked: new Set<string>(),
       muted: new Set<string>(),
       following: new Set<string>(),
@@ -130,6 +131,7 @@ async function viewerContext(sql: Sql, userId: string | null) {
     userId,
     joined: new Set(memberships.filter((m) => m.status === "active").map((m) => m.community_id)),
     banned: new Set(memberships.filter((m) => m.status === "banned").map((m) => m.community_id)),
+    pending: new Set(memberships.filter((m) => m.status === "pending").map((m) => m.community_id)),
     blocked: await blockedSet(sql, userId),
     // People the viewer muted: their posts and comments are left out of lists (they are not blocked).
     muted: await mutedSet(sql, userId),
@@ -238,6 +240,7 @@ async function toCards(sql: Sql, communities: Community[], ctx: ViewerContext): 
   return communities.map((c) => ({
     ...c,
     joined: ctx.joined.has(c.id),
+    pending: ctx.pending.has(c.id),
     onlineCount: onlineBy.get(c.id) ?? 0,
     memberFaces: facesBy.get(c.id) ?? [],
   }));
@@ -251,9 +254,12 @@ function fitsCategory(c: Community, category: string | undefined): boolean {
   return c.category.toLowerCase() === key || communityMatchesInterest(c.category, c.topics, key);
 }
 
-/** Communities anyone may find: public ones the viewer is not banned from. */
+/**
+ * Communities anyone may find: public ones the viewer is not banned from and is old enough for. Paid communities are
+ * listed too (their name and picture are public; the posts stay behind the subscription), so people can find them.
+ */
 async function discoverable(sql: Sql, ctx: ViewerContext): Promise<Community[]> {
-  return (await sql.query<Row>(`select c.* from communities c where c.visibility='public' and ${internals.communityAccessSql('$1')}
+  return (await sql.query<Row>(`select c.* from communities c where c.visibility='public' and ${internals.communityMetadataAccessSql('$1')}
     and not exists(select 1 from discovery_feedback f where f.user_id=$1 and f.target_type='community' and f.target_id=c.id and f.preference='hide')`, [ctx.userId ?? ''])).map(mapCommunity);
 }
 
@@ -910,7 +916,8 @@ export const onboardingSuggestions = createServerFn({ method: "GET" })
     const { userId } = context as Authed;
     const ctx = await viewerContext(sql, userId);
     const stats = await communityStats(sql);
-    const all = (await discoverable(sql, ctx)).filter((c) => !ctx.joined.has(c.id));
+    // Onboarding joins with one tap, so it only suggests communities anyone can walk into (no questions or invites).
+    const all = (await discoverable(sql, ctx)).filter((c) => !ctx.joined.has(c.id) && !ctx.pending.has(c.id) && c.joinPolicy === "open");
     const score = (c: Community) => stats.get(c.id)?.activity ?? 0;
     const matching = all.filter((c) => ctx.interests.some((k) => fitsCategory(c, k))).sort((a, b) => score(b) - score(a));
     const rest = all.filter((c) => !matching.includes(c)).sort((a, b) => score(b) - score(a));

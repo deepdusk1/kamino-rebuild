@@ -8,6 +8,7 @@ import { Button, Card, EmptyState, ErrorState, Field, Loading, Sheet, Txt } from
 import { showError, useAction } from "@/lib/errors";
 import { timeAgo } from "@/lib/format";
 import { childFolders, normalizeFolder } from "@/lib/folders";
+import { isWebLink } from "@/lib/hrefs";
 import { space, useTheme } from "@/theme";
 import { withCommunityTheme } from "@/components/CommunityTheme";
 
@@ -58,8 +59,9 @@ function Files() {
   if (files.isPending) return <Loading />;
   if (files.isError || !files.data) return <ErrorState error={files.error} onRetry={() => void files.refetch()} />;
   const canAdd = files.data.member?.status === "active";
-  const isMod = !!files.data.member && ["leader", "agent", "curator"].includes(files.data.member.role);
-  const isLead = !!files.data.member && ["leader", "agent"].includes(files.data.member.role);
+  // Only active members have their role's powers (the server checks this too).
+  const isMod = canAdd && ["leader", "agent", "curator"].includes(files.data.member!.role);
+  const isLead = canAdd && ["leader", "agent"].includes(files.data.member!.role);
   const crumbs = here ? here.split("/") : [];
 
   return (
@@ -106,7 +108,7 @@ function Files() {
             </View>
             {item.locked ? <Txt tone="muted">Opens at level {item.minLevel}. Keep taking part to get there.</Txt> : null}
             {item.note ? <Txt tone="muted">{item.note}</Txt> : null}
-            {item.url ? <Button label="Open link" small variant="secondary" onPress={() => void Linking.openURL(item.url)} style={{ alignSelf: "flex-start" }} /> : null}
+            {isWebLink(item.url) ? <Button label="Open link" small variant="secondary" onPress={() => void Linking.openURL(item.url.trim()).catch(showError)} style={{ alignSelf: "flex-start" }} /> : null}
             <Txt variant="caption" tone="subtle">{timeAgo(item.createdAt)}{item.minLevel > 1 && !item.locked ? ` · level ${item.minLevel}+` : ""}</Txt>
           </Card>
         )}

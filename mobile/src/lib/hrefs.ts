@@ -33,3 +33,12 @@ export function appHrefFromServerHref(href: string): string {
   if (profile) return `/profile/${profile[1]}`;
   return "/notifications";
 }
+
+/**
+ * Only plain web links (http / https) may be opened from content other people wrote, such as shared files or news
+ * headlines. Other kinds (javascript:, intent:, file:, app links) could do something unexpected on the phone.
+ */
+export function isWebLink(url: string | null | undefined): url is string {
+  if (typeof url !== "string") return false;
+  return /^https?:\/\/[^\s]+$/i.test(url.trim());
+}

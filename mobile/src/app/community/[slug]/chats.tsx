@@ -40,6 +40,9 @@ function CommunityChats() {
   if (page.isPending) return <Loading />;
   if (page.isError || !page.data) return <ErrorState error={page.error} onRetry={() => void page.refetch()} />;
   const active = page.data.member?.status === "active";
+  // Only leaders open private rooms (the server checks this too).
+  const isLeader = active && (page.data.member!.role === "leader" || page.data.member!.role === "agent");
+  const kinds = KINDS.filter((k) => k.kind !== "private" || isLeader);
 
   return (
     <>
@@ -69,9 +72,9 @@ function CommunityChats() {
       />
       <Sheet visible={open} title="New room" onClose={() => setOpen(false)}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-          {KINDS.map((k) => <Chip key={k.kind} label={k.label} selected={kind === k.kind} onPress={() => setKind(k.kind)} />)}
+          {kinds.map((k) => <Chip key={k.kind} label={k.label} selected={kind === k.kind} onPress={() => setKind(k.kind)} />)}
         </View>
-        {kind === "voice" ? <Txt variant="small" tone="muted">Voice rooms show who is in the room. Live audio is available on the website for now.</Txt> : null}
+        {kind === "voice" ? <Txt variant="small" tone="muted">Members join the voice call from inside the room. Leaders can limit who starts voice rooms.</Txt> : null}
         <Field label="Name" value={name} onChangeText={setName} maxLength={60} />
         <Button label="Create room" onPress={() => void create()} busy={creating} />
       </Sheet>

@@ -15,6 +15,7 @@ import {
 import { EmptyState, ErrorState, Field, Loading, PressableScale, Txt } from "@/components/ui";
 import { interestArt, isInterestKey } from "@/lib/brandArt";
 import { errorMessage, showError } from "@/lib/errors";
+import { setFollow, wantsFollow } from "@/lib/follow";
 import { compactNumber } from "@/lib/format";
 import { pickAvatar, pickPhoto } from "@/lib/media";
 import { markOnboardingShown } from "@/lib/useWelcome";
@@ -88,6 +89,7 @@ export default function Onboarding() {
     setBusyKey(c.id);
     try {
       if (state === "joined") {
+        // A tap during onboarding just undoes the join (no "are you sure?").
         await api.leave(c.id);
         setJoined((cur) => ({ ...cur, [c.id]: undefined }));
       } else if (!state) {
@@ -104,7 +106,10 @@ export default function Onboarding() {
   async function toggleFollow(p: CreatorCard) {
     setBusyKey(p.userId);
     try {
-      const result = await api.followProfile(p.userId);
+      const now = followed[p.userId];
+      // Says what it wants (follow / stop), so a quick double tap can't undo itself.
+      const want = now === undefined ? wantsFollow(p) : !now;
+      const result = await setFollow(queryClient, p.userId, want);
       setFollowed((cur) => ({ ...cur, [p.userId]: result.following || result.requested }));
     } catch (e) {
       showError(e);

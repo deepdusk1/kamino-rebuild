@@ -45,7 +45,8 @@ export const api = {
   addShared: (input: { slug: string; title: string; url?: string; note?: string; folder?: string; minLevel?: number }) => rpc<unknown>("addShared", input),
   moveShared: (input: { slug: string; id: number; folder: string; minLevel?: number }) => rpc<unknown>("moveShared", input),
   deleteShared: (slug: string, id: number) => rpc<unknown>("deleteShared", { slug, id }),
-  follow: (slug: string, userId: string) => rpc<unknown>("followMember", { slug, userId }),
+  /** Follow (true) or unfollow / cancel a request (false) for someone in this community. Safe to repeat. */
+  follow: (slug: string, userId: string, follow: boolean) => rpc<M.FollowResult>("followMember", { slug, userId, follow }),
 
   // ── Posts ────────────────────────────────────────────────────────────────
   post: (slug: string, postId: number) => rpc<M.PostPage>("getPostPage", { slug, postId }),
@@ -145,7 +146,11 @@ export const api = {
   setAvatar: (dataUrl: string) => rpc<unknown>("setAvatar", { dataUrl }),
   removeAvatar: () => rpc<unknown>("removeAvatar", {}),
   /** Follow / unfollow. A private account gets a request instead (`requested: true`); calling again cancels it. */
-  followProfile: (targetId: string) => rpc<M.FollowResult>("toggleFollowProfile", targetId),
+  /**
+   * Follow (`follow: true`) or unfollow / cancel a waiting request (`follow: false`). Always say which one: the server
+   * never flips a stale state. Prefer `setFollow` in src/lib/follow.ts, which also updates every screen's cache.
+   */
+  setFollow: (targetId: string, follow: boolean) => rpc<M.FollowResult>("setFollowProfile", { targetId, follow }),
   block: (targetId: string) => rpc<unknown>("blockUser", targetId),
   addWallPost: (handle: string, body: string) => rpc<{ ok: boolean; held: boolean }>("addWallPost", { handle, body }),
   /** Your own picture as your profile's wall cover. */

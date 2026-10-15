@@ -152,8 +152,8 @@ export function JoinDialog({
           placeholder="Your name here"
         />
       </SheetField>
-      {isPrivate && (
-        <SheetField label="Invite code (optional)">
+      {(isPrivate || community.joinPolicy === "invite") && (
+        <SheetField label={community.joinPolicy === "invite" ? "Invite code" : "Invite code (optional)"}>
           <input
             value={invite}
             onChange={(e) => setInvite(e.target.value)}

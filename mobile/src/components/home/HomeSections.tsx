@@ -177,12 +177,12 @@ function MiniCreatorCard({ creator: c, index, width, busy, onFollow }: { creator
           onPress={onFollow}
           index={index}
           label="Follow"
-          joinedLabel="Following"
+          joinedLabel={c.requested && !c.following ? "Requested" : "Following"}
           check={false}
           size="xs"
           full
           busy={busy}
-          accessibilityLabel={following ? `Unfollow ${c.displayName}` : `Follow ${c.displayName}`}
+          accessibilityLabel={c.following ? `Unfollow ${c.displayName}` : c.requested ? `Cancel your request to ${c.displayName}` : `Follow ${c.displayName}`}
           style={{ marginTop: 3, height: 17, paddingHorizontal: 4 }}
         />
       </View>

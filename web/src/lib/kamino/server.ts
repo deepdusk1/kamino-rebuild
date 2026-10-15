@@ -1,4 +1,5 @@
 import { createServerFn, createServerOnlyFn } from "@tanstack/react-start";
+import { z } from "zod";
 import { getSql, type Sql } from "@/lib/db";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { hashHue, levelFromRep, slugify } from "@/lib/utils";
@@ -313,12 +314,22 @@ async function savedSet(sql: Sql, userId: string | null, ids: number[]): Promise
   }
 }
 
+// Membership and follow rules live in community-membership.server.ts (tested against a real database).
+const loadMembership = createServerOnlyFn(() => import("./community-membership.server"));
+const loadLiveKit = createServerOnlyFn(() => import("./livekit.server"));
+
 async function addToOpenRooms(sql: Sql, userId: string, communityId: string) {
-  const rooms = await sql<{ id: number }>`
-    select id from chat_rooms where community_id = ${communityId} and kind in ('public','voice','screening')
-  `;
-  for (const r of rooms) {
-    await sql`insert into chat_members (room_id, user_id) values (${r.id}, ${userId}) on conflict do nothing`;
+  await (await loadMembership()).addToOpenRooms(sql, userId, communityId);
+}
+
+/** Disconnects someone from calls in rooms they no longer belong to (no-op when calls aren't set up). */
+async function disconnectFromCalls(sql: Sql, userId: string, roomIds: number[]) {
+  if (!roomIds.length) return;
+  try {
+    const { syncLiveKitParticipants } = await loadLiveKit();
+    for (const roomId of roomIds) await syncLiveKitParticipants(sql, roomId, [userId]);
+  } catch {
+    // Calls are optional (LiveKit not configured): nothing to disconnect.
   }
 }
 
@@ -878,11 +889,14 @@ export const listDiscover = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await db();
     const v = context as unknown as Viewer;
-    const rows = await sql`
-      select * from communities
-      where visibility = 'public'
-      order by member_count desc, name
-    `;
+    // Public communities the viewer may see (not ones they were removed from), biggest first.
+    const rows = await sql.query(
+      `select c.* from communities c
+       where c.visibility = 'public' and ${communityMetadataAccessSql("$1", "c")}
+       order by c.member_count desc, c.name
+       limit 200`,
+      [v.userId ?? ""],
+    );
     let communities = rows.map(mapCommunity);
     if (v.userId) {
       const mine = await sql<{ community_id: string }>`
@@ -938,7 +952,7 @@ export const getCommunityPage = createServerFn({ method: "GET" })
         `).map((r) => r.followee_id)
       : [];
     const followIds = followingRows.map((r) => r.followee_id);
-    const isMod = canModerate(member?.role);
+    const isMod = member?.status === "active" && canModerate(member.role);
     let raw: Record<string, unknown>[];
     try {
       raw = await sql.query(
@@ -1384,106 +1398,129 @@ export const getPostPage = createServerFn({ method: "GET" })
     return { community, member, post, comments, poll, quizBoard, myQuiz, quizRun, wikiPinned };
   });
 
+const joinSchema = z.object({
+  slug: z.string().trim().min(1).max(100),
+  nickname: z.string().max(60).optional(),
+  answers: z.array(z.string().max(1000)).max(10).optional(),
+  invite: z.string().max(100).optional(),
+});
+
+/** Active leaders (owner and co-leaders) of a community, for join requests. */
+async function communityLeaderIds(sql: Sql, communityId: string): Promise<string[]> {
+  return (await loadMembership()).communityLeaderIds(sql, communityId);
+}
+
+/** Takes someone out of a community's rooms, stages and custom roles, and out of any call there. */
+async function dropCommunityAccess(sql: Sql, userId: string, communityId: string) {
+  await disconnectFromCalls(sql, userId, await (await loadMembership()).dropCommunityAccess(sql, userId, communityId));
+}
+
+/** Removes a member (a leader's ban or the third strike). Their role is reset so a removed curator has no powers. */
+async function banMember(sql: Sql, userId: string, communityId: string): Promise<boolean> {
+  const result = await (await loadMembership()).banMember(sql, userId, communityId);
+  await disconnectFromCalls(sql, userId, result.inCallRooms);
+  return result.changed;
+}
+
+/** Lets a removed member back in (a leader's "restore" or an accepted appeal), with their rooms back. */
+async function restoreMember(sql: Sql, userId: string, communityId: string): Promise<boolean> {
+  return (await loadMembership()).restoreMember(sql, userId, communityId);
+}
+
 export const joinCommunity = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { slug: string; nickname?: string; answers?: string[]; invite?: string }) => d)
+  .validator((d: { slug: string; nickname?: string; answers?: string[]; invite?: string }) => joinSchema.parse(d))
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
+    await guard(userId, "join");
     await ensureProfile(sql, { userId, email: null, name: data.nickname ?? null });
     await requireMinAge(sql, userId);
     const community = await requireCommunity(sql, data.slug);
     const existing = await membershipOf(sql, userId, data.slug);
-    if (existing?.status === "banned") throw new Error("You are banned from this community.");
+    if (existing?.status === "banned") throw new Error("You were removed from this community. You can appeal from its page.");
     if (existing?.status === "active") return { ok: true, pending: false };
     if (existing?.status === "pending") return { ok: true, pending: true };
     const profile = mapProfile((await sql`select * from profiles where user_id = ${userId}`)[0]!);
     if (!(await canReadForViewer(sql, userId, { ...community, visibility: 'public' }, null))) throw new Error('This community is outside your checked age eligibility.');
-    let invited = false;
+
+    // An invite is checked here but only used up once the membership exists, so a failed join never wastes it.
+    const membership = await loadMembership();
     const code = (data.invite ?? "").trim().toLowerCase();
-    if (code) {
-      try {
-        const inv = (
-          await sql<{ code: string; max_uses: number; uses: number; expires_at: unknown }>`
-            select code, max_uses, uses, expires_at from invite_codes
-            where code = ${code} and community_id = ${data.slug}
-          `
-        )[0];
-        if (!inv) throw new Error("That invite code isn’t valid.");
-        if (inv.expires_at && new Date(String(inv.expires_at)).getTime() < Date.now()) {
-          throw new Error("That invite expired.");
+    if (code) await membership.checkInvite(sql, code, data.slug);
+    const invited = Boolean(code);
+    const joinPolicy = String((await sql`select join_policy from communities where id = ${data.slug}`)[0]?.join_policy ?? "open");
+    if (joinPolicy === "invite" && !invited) throw new Error("This community is invite only. Ask a member for an invite.");
+    const pending = (community.visibility === "private" || joinPolicy === "approval") && !invited;
+
+    // Leaders' join questions are asked whenever they review the request.
+    if (pending) {
+      const questions = await sql<{ prompt: string }>`
+        select prompt from join_questions where community_id = ${data.slug} order by sort_order, id
+      `;
+      if (questions.length) {
+        const answers = (data.answers ?? []).map((s) => s.trim().slice(0, 500));
+        if (answers.length < questions.length || answers.slice(0, questions.length).some((a) => !a))
+          throw new Error("Answer the join questions first.");
+        for (const a of answers) {
+          const err = scanText(a);
+          if (err) throw new Error(err);
         }
-        if (Number(inv.max_uses) > 0 && Number(inv.uses) >= Number(inv.max_uses)) {
-          throw new Error("That invite is used up.");
-        }
-        await sql`update invite_codes set uses = uses + 1 where code = ${code}`;
-        invited = true;
-      } catch (e) {
-        if (e instanceof Error && e.message.includes("invite")) throw e;
-      }
-    }
-    if (community.visibility === "private" && !invited) {
-      try {
-        const questions = await sql<{ prompt: string }>`
-          select prompt from join_questions where community_id = ${data.slug} order by sort_order, id
+        await sql`
+          insert into join_answers (user_id, community_id, answers)
+          values (${userId}, ${data.slug}, ${JSON.stringify(answers.slice(0, questions.length))})
+          on conflict (user_id, community_id) do update set answers = excluded.answers
         `;
-        if (questions.length) {
-          const answers = (data.answers ?? []).map((s) => s.trim()).filter(Boolean);
-          if (answers.length < questions.length)
-            throw new Error("Answer the join questions first.");
-          await sql`
-            insert into join_answers (user_id, community_id, answers)
-            values (${userId}, ${data.slug}, ${JSON.stringify(answers)})
-            on conflict (user_id, community_id) do update set answers = excluded.answers
-          `;
-        }
-      } catch (e) {
-        if (e instanceof Error && e.message.includes("join questions")) throw e;
       }
     }
-    const nick = (data.nickname || profile.displayName).slice(0, 24);
-    const joinPolicy = (await sql`select join_policy from communities where id = ${data.slug}`)[0]?.join_policy;
-    if (joinPolicy === 'invite' && !invited) throw new Error('This community requires an invitation.');
-    const pending = (community.visibility === "private" || joinPolicy === 'approval') && !invited;
-    await sql`
+
+    const nick = ((data.nickname ?? "").trim() || profile.displayName).slice(0, 24);
+    // The capacity trigger (0031) refuses a full micro-community here; a double tap inserts once.
+    const inserted = await sql`
       insert into memberships (user_id, community_id, role, status, nickname, persona_hue)
       values (${userId}, ${data.slug}, 'member', ${pending ? "pending" : "active"}, ${nick}, ${profile.avatarHue})
+      on conflict (user_id, community_id) do nothing
+      returning user_id
     `;
+    if (!inserted.length) {
+      const now = await membershipOf(sql, userId, data.slug);
+      if (now?.status === "banned") throw new Error("You were removed from this community. You can appeal from its page.");
+      return { ok: true, pending: now?.status === "pending" };
+    }
+    if (invited) {
+      if (!(await membership.useInvite(sql, code, data.slug))) {
+        // Someone used the last place on this invite a moment ago.
+        await sql`delete from memberships where user_id = ${userId} and community_id = ${data.slug} and status = 'active'`;
+        throw new Error("That invite is used up.");
+      }
+    }
     if (!pending) {
       await sql`update communities set member_count = member_count + 1 where id = ${data.slug}`;
-      const rooms = await sql<{
-        id: number;
-      }>`select id from chat_rooms where community_id = ${data.slug} and kind in ('public','voice','screening')`;
-      for (const r of rooms) {
-        await sql`insert into chat_members (room_id, user_id) values (${r.id}, ${userId}) on conflict do nothing`;
-      }
+      await addToOpenRooms(sql, userId, data.slug);
     } else {
-      await notify(
-        sql,
-        community.createdBy,
-        "join",
-        "Join request",
-        `${nick} asked to enter ${community.name}`,
-        `/c/${data.slug}/mod`,
-        { actorId: userId, targetType: "community", targetId: data.slug },
-      );
+      for (const leader of await communityLeaderIds(sql, data.slug)) {
+        await notify(sql, leader, "join", "Join request", `${nick} asked to join ${community.name}`, `/c/${data.slug}/mod`, {
+          actorId: userId,
+          targetType: "community",
+          targetId: data.slug,
+        });
+      }
     }
     return { ok: true, pending };
   });
 
+/**
+ * Leaves a community, or cancels a waiting join request. A removed (banned) member stays removed: leaving never
+ * clears a ban, so it can't be used to rejoin. The owner must hand the community to a co-leader first.
+ */
 export const leaveCommunity = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((slug: string) => slug)
+  .validator((slug: string) => z.string().trim().min(1).max(100).parse(slug))
   .handler(async ({ context, data: slug }) => {
     const sql = await db();
     const { userId } = context as Authed;
-    const m = await membershipOf(sql, userId, slug);
-    if (!m) return { ok: true };
-    if (m.role === "agent") throw new Error("Transfer agent first, or archive the community.");
-    await sql`delete from memberships where user_id = ${userId} and community_id = ${slug}`;
-    if (m.status === "active") {
-      await sql`update communities set member_count = greatest(member_count - 1, 0) where id = ${slug}`;
-    }
+    const result = await (await loadMembership()).leaveMembership(sql, userId, slug);
+    await disconnectFromCalls(sql, userId, result.inCallRooms);
     return { ok: true };
   });
 
@@ -1588,10 +1625,8 @@ export const createPost = createServerFn({ method: "POST" })
     if (m?.status !== "active") throw new Error("Join this community to post.");
     await assertCommunityReadable(sql,userId,data.slug);
     const { enforceCommunityPolicy } = await import('./community-v9');
-    await enforceCommunityPolicy(sql,userId,data.slug,'post');
-    const keywordRow = (await sql`select keyword_filters from communities where id = ${data.slug}`)[0];
-    const keywords = parseJson<string[]>(keywordRow?.keyword_filters, []);
-    if (keywords.some(word => word && `${data.title}\n${data.body}`.toLowerCase().includes(word.toLowerCase()))) throw new Error('Your post includes a term blocked by this community.');
+    // Posting policy and the leaders' blocked phrases (moderators are exempt) are checked in one place.
+    await enforceCommunityPolicy(sql,userId,data.slug,'post',`${data.title}\n${data.body}`);
     await assertNotMuted(sql, userId, data.slug);
     const location = String(data.location ?? "").replace(/\s+/g, " ").trim().slice(0, 60);
     const err = scanText(`${data.title}\n${data.body}\n${data.payload?.url ?? ""}\n${location}`);
@@ -2092,7 +2127,9 @@ export const tipMember = createServerFn({ method: "POST" })
 
 export const followMember = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { slug: string; userId: string }) => d)
+  .validator((d: { slug: string; userId: string; follow?: boolean }) =>
+    z.object({ slug: z.string().min(1).max(100), userId: z.string().min(1).max(100), follow: z.boolean().optional() }).parse(d),
+  )
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
@@ -2100,7 +2137,10 @@ export const followMember = createServerFn({ method: "POST" })
     // One global follow graph: following a member here follows their profile everywhere,
     // exactly like following them from their profile page (private accounts get requests).
     await requireActiveMember(sql, userId, data.slug);
-    return toggleProfileFollow(sql, userId, data.userId);
+    // The app says what it wants (`follow`), so a stale button can't flip the wrong way; older callers still toggle.
+    return data.follow === undefined
+      ? toggleProfileFollow(sql, userId, data.userId)
+      : setProfileFollow(sql, userId, data.userId, data.follow);
   });
 
 export const blockUser = createServerFn({ method: "POST" })
@@ -3287,6 +3327,17 @@ export const setShowcase = createServerFn({ method: "POST" })
     return { ids };
   });
 
+const createCommunitySchema = z.object({
+  name: z.string().trim().min(3, "Name needs at least 3 characters.").max(60),
+  tagline: z.string().max(200).default(""),
+  description: z.string().max(4000).default(""),
+  category: z.string().trim().min(1, "Choose a category.").max(40),
+  visibility: z.enum(["public", "private", "unlisted"]),
+  /** Ignored: every Kamino community is 18+ (the app is adults only). Kept so older apps still send a valid body. */
+  ageGate: z.number().optional(),
+  rules: z.string().max(4000).default(""),
+});
+
 export const createCommunity = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -3298,7 +3349,7 @@ export const createCommunity = createServerFn({ method: "POST" })
       visibility: "public" | "private" | "unlisted";
       ageGate: number;
       rules: string;
-    }) => d,
+    }) => createCommunitySchema.parse(d),
   )
   .handler(async ({ context, data }) => {
     const sql = await db();
@@ -3308,38 +3359,45 @@ export const createCommunity = createServerFn({ method: "POST" })
     await ensureProfile(sql, { userId, email: null, name: null });
     const name = data.name.trim().slice(0, 40);
     if (name.length < 3) throw new Error("Name needs at least 3 characters.");
-    let id = slugify(name);
-    let n = 0;
-    while ((await sql`select 1 from communities where id = ${id}`).length) {
-      n += 1;
-      id = `${slugify(name).slice(0, 24)}-${n}`;
-    }
+    const tagline = data.tagline.trim().slice(0, 80);
+    const description = data.description.trim().slice(0, 800);
+    const rules = data.rules.trim().slice(0, 2000);
+    const textError = scanText(`${name}\n${tagline}\n${description}\n${rules}`);
+    if (textError) throw new Error(textError);
     const profile = mapProfile((await sql`select * from profiles where user_id = ${userId}`)[0]!);
     // Kamino is 18+ only (requireMinAge above enforces it), so every community is 18+.
     // The gate is forced server-side; the client value is ignored.
-    await sql`
-      insert into communities (id, name, tagline, description, category, cover, hue, visibility, age_gate, rules, created_by, member_count)
-      values (
-        ${id}, ${name}, ${data.tagline.slice(0, 80)}, ${data.description.slice(0, 800)},
-        ${data.category}, '/covers/hero.jpg', ${profile.avatarHue}, ${data.visibility},
-        18, ${data.rules.slice(0, 2000)}, ${userId}, 1
-      )
-    `;
+    const base = slugify(name).slice(0, 24) || "space";
+    let id = "";
+    for (let n = 0; n < 50 && !id; n += 1) {
+      const candidate = n === 0 ? slugify(name) : `${base}-${n + 1}`;
+      // Two people creating the same name at once: the loser simply tries the next number.
+      const made = await sql`
+        insert into communities (id, name, tagline, description, category, cover, hue, visibility, age_gate, rules, created_by, member_count)
+        values (
+          ${candidate}, ${name}, ${tagline}, ${description},
+          ${data.category}, '/covers/hero.jpg', ${profile.avatarHue}, ${data.visibility},
+          18, ${rules}, ${userId}, 1
+        )
+        on conflict (id) do nothing
+        returning id
+      `;
+      if (made.length) id = candidate;
+    }
+    if (!id) throw new Error("Couldn't pick an address for this community. Try a slightly different name.");
     await sql`
       insert into memberships (user_id, community_id, role, status, nickname, persona_hue)
-      values (${userId}, ${id}, 'agent', 'active', ${profile.displayName}, ${profile.avatarHue})
-    `;
-    await sql`
-      insert into chat_rooms (community_id, name, kind, created_by)
-      values (${id}, 'lobby', 'public', ${userId})
+      values (${userId}, ${id}, 'agent', 'active', ${profile.displayName.slice(0, 24)}, ${profile.avatarHue})
     `;
     const room = (
-      await sql<{
-        id: number;
-      }>`select id from chat_rooms where community_id = ${id} order by id desc limit 1`
+      await sql<{ id: number }>`
+        insert into chat_rooms (community_id, name, kind, created_by)
+        values (${id}, 'lobby', 'public', ${userId})
+        returning id
+      `
     )[0];
     if (room) {
-      await sql`insert into chat_members (room_id, user_id) values (${room.id}, ${userId})`;
+      await sql`insert into chat_members (room_id, user_id) values (${room.id}, ${userId}) on conflict do nothing`;
     }
     return { id };
   });
@@ -3597,7 +3655,9 @@ export const resolveReport = createServerFn({ method: "POST" })
 
 export const reviewJoin = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { slug: string; userId: string; allow: boolean }) => d)
+  .validator((d: { slug: string; userId: string; allow: boolean }) =>
+    z.object({ slug: z.string().min(1).max(100), userId: z.string().min(1).max(100), allow: z.boolean() }).parse(d),
+  )
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
@@ -3619,8 +3679,10 @@ export const reviewJoin = createServerFn({ method: "POST" })
         { actorId: userId, targetType: "community", targetId: data.slug },
       );
     } else {
-      await sql`delete from memberships where user_id = ${data.userId} and community_id = ${data.slug} and status = 'pending'`;
+      const declined = await sql`delete from memberships where user_id = ${data.userId} and community_id = ${data.slug} and status = 'pending' returning user_id`;
+      if (!declined.length) return { ok: true };
     }
+    await sql`delete from join_answers where user_id = ${data.userId} and community_id = ${data.slug}`;
     await sql`
       insert into audit_log (community_id, actor_id, action, detail)
       values (${data.slug}, ${userId}, ${data.allow ? "join:allow" : "join:deny"}, ${data.userId})
@@ -3630,8 +3692,8 @@ export const reviewJoin = createServerFn({ method: "POST" })
 
 export const setMemberRole = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(
-    (d: { slug: string; userId: string; action: "curator" | "member" | "ban" | "unban" }) => d,
+  .validator((d: { slug: string; userId: string; action: "curator" | "member" | "ban" | "unban" }) =>
+    z.object({ slug: z.string().min(1).max(100), userId: z.string().min(1).max(100), action: z.enum(["curator", "member", "ban", "unban"]) }).parse(d),
   )
   .handler(async ({ context, data }) => {
     const sql = await db();
@@ -3639,26 +3701,19 @@ export const setMemberRole = createServerFn({ method: "POST" })
     const m = await membershipOf(sql, userId, data.slug);
     if (m?.status !== "active" || !canLead(m?.role)) throw new Error("Leaders only.");
     if (data.userId === userId) throw new Error("Not on yourself.");
-    if (!["curator", "member", "ban", "unban"].includes(data.action))
-      throw new Error("Invalid action.");
     const target = await membershipOf(sql, data.userId, data.slug);
     if (!target) throw new Error("Member not found.");
     if (target.role === "agent" || target.role === "leader")
       throw new Error("You cannot change another community leader.");
-    if (
-      (data.action === "ban" && target.status === "banned") ||
-      (data.action === "unban" && target.status !== "banned")
-    )
-      return { ok: true };
     if (data.action === "ban") {
-      await sql`update memberships set status = 'banned' where user_id = ${data.userId} and community_id = ${data.slug}`;
-      if (target.status === "active")
-        await sql`update communities set member_count = greatest(member_count - 1, 0) where id = ${data.slug}`;
+      if (!(await banMember(sql, data.userId, data.slug))) return { ok: true };
     } else if (data.action === "unban") {
-      await sql`update memberships set status = 'active' where user_id = ${data.userId} and community_id = ${data.slug}`;
-      await sql`update communities set member_count = member_count + 1 where id = ${data.slug}`;
+      if (!(await restoreMember(sql, data.userId, data.slug))) return { ok: true };
     } else {
-      await sql`update memberships set role = ${data.action} where user_id = ${data.userId} and community_id = ${data.slug}`;
+      // Roles are only for active members (not someone waiting for approval or removed).
+      if (target.status !== "active") throw new Error("Only active members can be given a role.");
+      if (target.role === data.action) return { ok: true };
+      await sql`update memberships set role = ${data.action} where user_id = ${data.userId} and community_id = ${data.slug} and status = 'active'`;
     }
     await sql`
       insert into audit_log (community_id, actor_id, action, detail)
@@ -3816,7 +3871,8 @@ export const deletePost = createServerFn({ method: "POST" })
     )[0];
     if (!post) throw new Error("Post not found");
     const m = await membershipOf(sql, userId, data.slug);
-    if (post.author_user_id !== userId && !canModerate(m?.role))
+    const isModerator = m?.status === "active" && canModerate(m.role);
+    if (post.author_user_id !== userId && !isModerator)
       throw new Error("You can’t remove this.");
     await sql`delete from comment_likes where comment_id in (select id from comments where post_id = ${data.postId})`;
     await sql`delete from comments where post_id = ${data.postId}`;
@@ -3833,7 +3889,7 @@ export const deletePost = createServerFn({ method: "POST" })
     }
     await sql`delete from posts where id = ${data.postId}`;
     await deleteMedia([...pictures.map((r) => r.data_url), coverRow?.cover]);
-    if (canModerate(m?.role) && post.author_user_id !== userId) {
+    if (isModerator && post.author_user_id !== userId) {
       await sql`
         insert into audit_log (community_id, actor_id, action, detail)
         values (${data.slug}, ${userId}, 'post:delete', ${String(data.postId)})
@@ -4048,68 +4104,67 @@ export const deleteShared = createServerFn({ method: "POST" })
     )[0];
     if (!row) throw new Error("File not found");
     const m = await membershipOf(sql, userId, data.slug);
-    if (row.author_user_id !== userId && !canModerate(m?.role))
+    if (row.author_user_id !== userId && !(m?.status === "active" && canModerate(m.role)))
       throw new Error("You can’t remove this.");
     await sql`delete from shared_items where id = ${data.id} and community_id = ${data.slug}`;
     return { ok: true };
   });
 
+type FollowState = { following: boolean; requested: boolean };
+
 /**
- * Follow or unfollow someone. Following a private account sends a request instead (they approve it in
- * `followRequests` / `answerFollowRequest`); calling this again while it waits cancels the request.
- * Returns `{ following, requested }`.
+ * Sets whether the viewer follows someone (see setProfileFollow in community-membership.server.ts): idempotent, so a
+ * button showing an out-of-date state can never do the opposite of what it says. New follows and requests notify.
  */
-async function toggleProfileFollow(sql: Sql, userId: string, targetId: string): Promise<{ following: boolean; requested: boolean }> {
-  if (userId === targetId) throw new Error("That's you.");
-  const blocked = await sql`
-    select 1 from blocks
-    where (blocker_id = ${userId} and blocked_id = ${targetId})
-       or (blocker_id = ${targetId} and blocked_id = ${userId})
-  `;
-  if (blocked.length) throw new Error("You can't follow someone you've blocked.");
-  const exists =
-    await sql`select 1 from profile_follows where follower_id = ${userId} and followee_id = ${targetId}`;
-  if (exists.length) {
-    await sql`delete from profile_follows where follower_id = ${userId} and followee_id = ${targetId}`;
-    return { following: false, requested: false };
-  }
-  const cancelled = await sql`delete from follow_requests where follower_id = ${userId} and followee_id = ${targetId} returning follower_id`;
-  if (cancelled.length) return { following: false, requested: false };
-  const target = (
-    await sql<{ handle: string; private_account: unknown }>`select handle, private_account from profiles where user_id = ${targetId}`
-  )[0];
-  if (!target) throw new Error("Profile not found");
-  const me = (
-    await sql<{
-      display_name: string;
-      handle: string;
-    }>`select display_name, handle from profiles where user_id = ${userId}`
-  )[0];
-  if (asBool(target.private_account)) {
-    await sql`insert into follow_requests (follower_id, followee_id) values (${userId}, ${targetId}) on conflict do nothing`;
-    await notify(sql, targetId, "follow_request", "Follow request", `${me?.display_name ?? "Someone"} asked to follow you`, `/u/${target.handle}`, {
-      actorId: userId,
-      targetType: "profile",
-      targetId,
-    });
-    return { following: false, requested: true };
-  }
-  await sql`insert into profile_follows (follower_id, followee_id) values (${userId}, ${targetId}) on conflict do nothing`;
-  await notify(sql, targetId, "follow", me?.display_name ?? "Someone", `${me?.display_name ?? "Someone"} started following you`, `/u/${target.handle}`, {
-    actorId: userId,
-    targetType: "profile",
-    targetId,
+async function setProfileFollow(sql: Sql, userId: string, targetId: string, follow: boolean): Promise<FollowState> {
+  return (await loadMembership()).setProfileFollow(sql, userId, targetId, follow, async (kind, target) => {
+    const me = (await sql<{ display_name: string }>`select display_name from profiles where user_id = ${userId}`)[0];
+    const name = me?.display_name ?? "Someone";
+    if (kind === "follow_request")
+      await notify(sql, target.userId, "follow_request", "Follow request", `${name} asked to follow you`, `/u/${target.handle}`, {
+        actorId: userId,
+        targetType: "profile",
+        targetId: target.userId,
+      });
+    else
+      await notify(sql, target.userId, "follow", name, `${name} started following you`, `/u/${target.handle}`, {
+        actorId: userId,
+        targetType: "profile",
+        targetId: target.userId,
+      });
   });
-  return { following: true, requested: false };
+}
+
+/**
+ * Flips whatever the server has now (kept for the website's older buttons; the phone app uses `setFollowProfile`).
+ * A waiting request is cancelled. Returns `{ following, requested }`.
+ */
+async function toggleProfileFollow(sql: Sql, userId: string, targetId: string): Promise<FollowState> {
+  const now = await (await loadMembership()).followStateOf(sql, userId, targetId);
+  return setProfileFollow(sql, userId, targetId, !(now.following || now.requested));
 }
 
 export const toggleFollowProfile = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((targetId: string) => targetId)
+  .validator((targetId: string) => z.string().min(1).max(100).parse(targetId))
   .handler(async ({ context, data: targetId }) => {
     const sql = await db();
     const { userId } = context as Authed;
+    await guard(userId, "follow");
+    await requireMinAge(sql, userId);
     return toggleProfileFollow(sql, userId, targetId);
+  });
+
+/** Follow (`follow: true`) or unfollow / cancel a request (`follow: false`). Safe to repeat. Returns `{ following, requested }`. */
+export const setFollowProfile = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { targetId: string; follow: boolean }) => z.object({ targetId: z.string().min(1).max(100), follow: z.boolean() }).parse(d))
+  .handler(async ({ context, data }) => {
+    const sql = await db();
+    const { userId } = context as Authed;
+    await guard(userId, "follow");
+    if (data.follow) await requireMinAge(sql, userId);
+    return setProfileFollow(sql, userId, data.targetId, data.follow);
   });
 
 export const listFollows = createServerFn({ method: "GET" })
@@ -4474,7 +4529,7 @@ export const setPostFlags = createServerFn({ method: "POST" })
     if (!post) throw new Error("Post not found");
     const m = await membershipOf(sql, userId, data.slug);
     const owner = post.author_user_id === userId;
-    if (!owner && !canModerate(m?.role)) throw new Error("You can’t change this post.");
+    if (!owner && !(m?.status === "active" && canModerate(m.role))) throw new Error("You can’t change this post.");
     const commentsDisabled = data.commentsDisabled ?? asBool(post.comments_disabled);
     let pinned = asBool(post.pinned);
     let hidden = asBool(post.hidden);
@@ -4710,18 +4765,26 @@ export const createInvite = createServerFn({ method: "POST" })
 
 export const issueStrike = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { slug: string; userId: string; reason: string }) => d)
+  .validator((d: { slug: string; userId: string; reason: string }) =>
+    z.object({ slug: z.string().min(1).max(100), userId: z.string().min(1).max(100), reason: z.string().max(300) }).parse(d),
+  )
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
     const m = await requireActiveMember(sql, userId, data.slug);
     if (!canLead(m.role)) throw new Error("Leaders issue strikes.");
     if (data.userId === userId) throw new Error("Not on yourself.");
-    const err = scanText(data.reason);
+    const target = await membershipOf(sql, data.userId, data.slug);
+    if (!target || target.status !== "active") throw new Error("Strikes are for active members of this community.");
+    // Leaders can't remove each other (or the owner) with strikes.
+    if (target.role === "agent" || target.role === "leader") throw new Error("You cannot give a strike to another community leader.");
+    const reason = data.reason.trim().slice(0, 200);
+    if (reason.length < 3) throw new Error("Add a short reason so the member knows what happened.");
+    const err = scanText(reason);
     if (err) throw new Error(err);
     await sql`
       insert into strikes (community_id, user_id, issued_by, reason)
-      values (${data.slug}, ${data.userId}, ${userId}, ${data.reason.trim().slice(0, 200)})
+      values (${data.slug}, ${data.userId}, ${userId}, ${reason})
     `;
     const n = Number(
       (
@@ -4735,13 +4798,12 @@ export const issueStrike = createServerFn({ method: "POST" })
       data.userId,
       "strike",
       "Strike issued",
-      data.reason.slice(0, 80),
+      reason.slice(0, 80),
       `/c/${data.slug}`,
       { targetType: "community", targetId: data.slug },
     );
-    if (n >= 3) {
-      await sql`update memberships set status = 'banned' where user_id = ${data.userId} and community_id = ${data.slug}`;
-      await sql`update communities set member_count = greatest(member_count - 1, 0) where id = ${data.slug}`;
+    const banned = n >= 3 && (await banMember(sql, data.userId, data.slug));
+    if (banned) {
       await notify(
         sql,
         data.userId,
@@ -5105,4 +5167,9 @@ export const internals = {
   syncAchievements,
   achievementsFor,
   addToOpenRooms,
+  banMember,
+  restoreMember,
+  dropCommunityAccess,
+  communityLeaderIds,
+  setProfileFollow,
 };

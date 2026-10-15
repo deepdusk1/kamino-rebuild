@@ -29,6 +29,7 @@ import { haptic } from "@/lib/haptics";
 import { HELD_MESSAGE, HELD_TITLE } from "@/lib/held";
 import { STICKER_PACKS } from "@/lib/stickers";
 import { usePostActions } from "@/lib/usePostActions";
+import { followLabel, toggleFollowWithConfirm, type FollowState } from "@/lib/follow";
 import { TipButton } from "@/components/kamino/TipButton";
 import { font, radius, useTheme } from "@/theme";
 import { PostContentTools } from "@/components/content/PostContentTools";
@@ -85,7 +86,6 @@ function PostScreen() {
   const [editing, setEditing] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
-  const [following, setFollowing] = useState<boolean | null>(null);
   const [quoteOpen, setQuoteOpen] = useState(false);
   const [quoteNote, setQuoteNote] = useState("");
 
@@ -122,12 +122,11 @@ function PostScreen() {
     await api.repost(slug!, id);
     notify("Reposted", "Shared to your followers in this community.");
   });
+  // Follow state comes from the author's profile (shared with every other screen through src/lib/follow.ts).
+  const followState: FollowState = { following: author.data?.following ?? false, requested: author.data?.requested ?? false };
   const [follow, followBusy] = useAction(async () => {
-    const result = await api.followProfile(post!.author.userId);
-    setFollowing(result.following);
-    if (result.requested) notify("Request sent", "This account is private. You'll see their posts once they accept.");
-    else if (result.following) haptic.success();
-    void queryClient.invalidateQueries({ queryKey: ["profileOverview", post!.author.handle] });
+    if (!post) return;
+    await toggleFollowWithConfirm(queryClient, { userId: post.author.userId, name: post.author.nickname }, followState);
   });
 
   // Comment likes change at once and roll back if the server says no.
@@ -169,7 +168,7 @@ function PostScreen() {
   const showBody = !post.contentWarning || revealed;
   const pictures = post.type === "story" ? [] : postPictures(post);
   const { lead, rest } = pictures.length && !formatted ? splitLead(post.body) : { lead: "", rest: post.body };
-  const isFollowing = following ?? author.data?.following ?? false;
+  const isFollowing = followState.following || followState.requested;
   const creator = author.data?.profile.creator;
   const list = comments.data ?? page.comments.map((c) => ({ ...c, authorVerified: false, mine: c.author.userId === myId }));
   const commentCount = Math.max(post.commentCount, list.length);
@@ -243,7 +242,7 @@ function PostScreen() {
                 </View>
               </View>
               {isAuthor ? null : isFollowing ? (
-                <JoinButton joined color={theme.violet} joinedLabel="Following" size="md" busy={followBusy} onPress={() => void follow()} accessibilityLabel={`Unfollow ${post.author.nickname}`} style={{ height: 30 }} />
+                <JoinButton joined color={theme.violet} joinedLabel={followLabel(followState)} size="md" busy={followBusy} onPress={() => void follow()} accessibilityLabel={followState.following ? `Unfollow ${post.author.nickname}` : `Cancel your follow request to ${post.author.nickname}`} style={{ height: 30 }} />
               ) : (
                 <GradientButton label="Follow" size="sm" busy={followBusy} onPress={() => void follow()} accessibilityLabel={`Follow ${post.author.nickname}`} style={{ height: 30, minWidth: 76 }} />
               )}
