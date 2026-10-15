@@ -1,9 +1,14 @@
 /**
- * Age check used at sign-up. Kamino is for people aged 13 and over.
+ * Age check used at sign-up. Kamino is for adults aged 18 and over.
+ * Keep MINIMUM_AGE equal to the server's (web/src/lib/kamino/age.ts): the server makes the final decision,
+ * this copy only stops an under-18 account from being created in the first place.
  * The date of birth is only ever compared with today's date; it is never saved anywhere.
  */
 
-export const MINIMUM_AGE = 13;
+export const MINIMUM_AGE = 18;
+
+/** What an under-age person is told. Lives here (not in a component) so the session code can use it too. */
+export const YOUNG_MESSAGE = `Kamino is for people aged ${MINIMUM_AGE} and over, so we can't create an account for you. We don't keep the date you entered.`;
 /** At this age the person is also marked as old enough for age-gated (16+/18+) communities. */
 export const ADULT_AGE = 18;
 

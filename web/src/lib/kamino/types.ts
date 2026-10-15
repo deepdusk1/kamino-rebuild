@@ -80,7 +80,7 @@ export type Profile = {
   bubbleHue: number;
   bubbleStyle: BubbleStyle;
   ageConfirmed: boolean;
-  /** True once the person has passed the 13+ birthday check (the date itself is never saved). */
+  /** True once the person has passed the 18+ birthday check (the date itself is never saved). */
   minAgeConfirmed: boolean;
   dmPrivacy: DmPrivacy;
   hideJoined: boolean;

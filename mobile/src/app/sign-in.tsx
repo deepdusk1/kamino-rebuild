@@ -17,7 +17,7 @@ import { font, radius, shadow, space, useTheme } from "@/theme";
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Onboarding step 1: create an account (name, email, password, 13+ birthday check) or sign in.
+ * Onboarding step 1: create an account (name, email, password, 18+ birthday check) or sign in.
  * The Welcome screen opens it with `?mode=up` (Get Started) or `?mode=in` (I already have an account).
  */
 export default function SignIn() {

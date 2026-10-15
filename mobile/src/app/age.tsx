@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pressable, View } from "react-native";
+import { Alert, Pressable, View } from "react-native";
 import { useSession } from "@/auth/session";
 import { BirthdayFields, EMPTY_BIRTHDAY, judgeBirthday, YOUNG_MESSAGE } from "@/components/BirthdayFields";
 import { GradientWord, VIOLET_GRADIENT } from "@/components/home/Decor";
@@ -28,7 +28,9 @@ export default function AgeCheck() {
     try {
       // Under-18 answers are sent too: the server then erases the account instead of keeping it.
       const allowed = await confirmAge({ year: Number(birthday.year), month: Number(birthday.month), day: Number(birthday.day) });
-      if (!allowed) setError(YOUNG_MESSAGE);
+      // The account is already erased and signed out, so this screen is about to close: a system alert
+      // stays visible after it does (text set on this screen would vanish with it).
+      if (!allowed) Alert.alert("Kamino is 18+", YOUNG_MESSAGE);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
