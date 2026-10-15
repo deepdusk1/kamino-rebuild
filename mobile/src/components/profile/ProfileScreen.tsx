@@ -50,6 +50,7 @@ import {
 } from "@/components/ui";
 import { defaultCover } from "@/lib/brandArt";
 import { errorMessage } from "@/lib/errors";
+import { TipButton } from "@/components/kamino/TipButton";
 import { compactNumber, plainPreview, timeAgo } from "@/lib/format";
 import { haptic } from "@/lib/haptics";
 import { tellIfHeld } from "@/lib/held";
@@ -421,6 +422,14 @@ export function ProfileScreen({ handle, inTabs }: Props) {
           onPress: () => router.push("/saved"),
         },
         {
+          key: "kamino",
+          label: "KAMINO wallet",
+          icon: "diamond-outline",
+          tone: "violet",
+          hint: "Your balance and tips",
+          onPress: () => router.push("/kamino-wallet"),
+        },
+        {
           key: "creator-studio",
           label: "Creator studio",
           icon: "stats-chart-outline",
@@ -758,6 +767,13 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                 busy={busy === "follow"}
                 style={{ width: 118, height: 32 }}
                 accessibilityLabel={`${followLabel} ${p.displayName}`}
+              />
+            )}
+
+            {isSelf ? null : (
+              <TipButton
+                recipient={{ userId: p.userId, name: p.displayName }}
+                target={{ type: "profile", id: p.userId }}
               />
             )}
 

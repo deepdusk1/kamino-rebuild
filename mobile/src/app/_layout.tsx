@@ -400,6 +400,7 @@ function Navigation() {
             options={{ headerShown: false, gestureEnabled: false }}
           />
           <Stack.Screen name="search" options={{ headerShown: false }} />
+          <Stack.Screen name="kamino-wallet" options={{ title: "KAMINO wallet" }} />
           <Stack.Screen
             name="community/[slug]/index"
             options={{ headerShown: false }}

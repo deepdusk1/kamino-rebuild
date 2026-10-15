@@ -305,5 +305,13 @@ export async function runNotificationJobs() {
   });
   await sql`update progression_seasons set status='active' where status='scheduled' and starts_at<=now() and ends_at>now()`;
   await sql`update progression_seasons set status='ended' where status in ('scheduled','active') and ends_at<=now()`;
-  return { delivered, mediaDeletion, earningsReconciled, mediaJobs, push, email, semanticIndex, checkedAt: now.toISOString() };
+  // KAMINO tips whose wallet sent them while the app was closed are confirmed here (no-op when tipping is off).
+  let kaminoTips: { confirmed: number; unavailable?: boolean } = { confirmed: 0 };
+  try {
+    const { sweepKaminoTips } = await import("./kamino-notify.server");
+    kaminoTips = { confirmed: await sweepKaminoTips() };
+  } catch {
+    kaminoTips = { confirmed: 0, unavailable: true };
+  }
+  return { delivered, mediaDeletion, earningsReconciled, mediaJobs, push, email, semanticIndex, kaminoTips, checkedAt: now.toISOString() };
 }

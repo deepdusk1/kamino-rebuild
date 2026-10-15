@@ -130,6 +130,19 @@ store upload if you want a different one — it can never be changed afterwards.
   for the App ID `com.kelnovalabs.kamino` (EAS does this on the next build if you let it manage the App ID).
 - New Google/Apple accounts see the 18+ birthday check right after their first sign-in.
 
+### KAMINO tips (Solana)
+
+Tipping opens the person's own Solana wallet app (Phantom, Solflare…) to approve each transfer; Kamino never
+holds keys or tokens. Before turning it on in a store build:
+
+- **App Store:** Apple has made apps remove crypto tips attached to posts (guideline 3.1.1, the 2023 Damus case),
+  so tips on posts stay hidden on iPhone unless `KAMINO_TIPS_IOS_POSTS=true`. Mention profile tips in the review
+  notes; Apple may still ask for changes.
+- **Google Play:** declare the feature under App content > Financial features, and follow Play's blockchain-based
+  content policy (no promises of returns, no buying the token in the app).
+- Get advice on whether tipping counts as a regulated activity where you operate (for example FINTRAC in Canada).
+  This design avoids custody on purpose, but it isn't legal advice.
+
 ### App Store / Google Play review checklist
 
 Apple and Google reject apps with user-generated content unless these exist. They are all built in:

@@ -16,15 +16,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { Sql } from "@/lib/db";
 import { authMiddleware } from "@/lib/auth/middleware";
-import {
-  loadScene,
-  requireSceneManager,
-  requireScenePlay,
-  requireSceneRead,
-  storytellerWrites,
-  tryStoryteller,
-  turnsForPrompt,
-} from "./ai-features";
+import { requireSceneManager, storyHelpers } from "./ai-features";
 import { AiUnavailableError, chatComplete } from "./ai.server";
 import { guard } from "./guard";
 import { branchPrompt, parseBranches } from "./roleplay";
@@ -33,7 +25,7 @@ import { internals } from "./server";
 import { castVote, currentRound, readBranches, rewindTo, roundHasOptions, saveBranchOptions, winningOption } from "./story.server";
 
 type Authed = { userId: string };
-type Scene = Awaited<ReturnType<typeof loadScene>>;
+type Scene = Awaited<ReturnType<ReturnType<typeof storyHelpers>["loadScene"]>>;
 
 export type StoryBranches = {
   /** The turn these options follow (0 before the story has any turns). */
@@ -76,6 +68,7 @@ export const getAiStoryBranches = createServerFn({ method: "GET" })
   .handler(async ({ context, data }): Promise<StoryBranches> => {
     const sql = await internals.db();
     const { userId } = context as Authed;
+    const { loadScene, requireSceneRead } = storyHelpers();
     const scene = await loadScene(sql, data.sceneId);
     const m = await requireSceneRead(sql, userId, scene.row.community_id);
     return branchesFor(sql, scene, userId, m?.status === "active" && isOpen(scene));
@@ -91,6 +84,7 @@ export const proposeAiStoryBranches = createServerFn({ method: "POST" })
   .handler(async ({ context, data }): Promise<StoryBranches> => {
     const sql = await internals.db();
     const { userId } = context as Authed;
+    const { loadScene, requireScenePlay, turnsForPrompt } = storyHelpers();
     const scene = await loadScene(sql, data.sceneId);
     await requireScenePlay(sql, userId, scene.row.community_id);
     if (!isOpen(scene)) throw new Error("This story has ended.");
@@ -123,6 +117,7 @@ export const voteAiStoryBranch = createServerFn({ method: "POST" })
   .handler(async ({ context, data }): Promise<StoryBranches> => {
     const sql = await internals.db();
     const { userId } = context as Authed;
+    const { loadScene, requireScenePlay } = storyHelpers();
     const scene = await loadScene(sql, data.sceneId);
     await requireScenePlay(sql, userId, scene.row.community_id);
     if (!isOpen(scene)) throw new Error("This story has ended.");
@@ -140,6 +135,7 @@ export const applyAiStoryBranch = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await internals.db();
     const { userId } = context as Authed;
+    const { loadScene, requireScenePlay, storytellerWrites, tryStoryteller } = storyHelpers();
     const scene = await loadScene(sql, data.sceneId);
     await requireScenePlay(sql, userId, scene.row.community_id);
     if (!isOpen(scene)) throw new Error("This story has ended.");
