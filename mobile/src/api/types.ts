@@ -529,6 +529,19 @@ export type RoleplayScene = RoleplaySceneSummary & {
   canPlay: boolean;
 };
 
+/** "What happens next?" options for a story's current round, with votes (see web/src/lib/kamino/story.ts). */
+export type StoryBranches = {
+  /** The turn these options follow (0 before the story has any turns). */
+  round: number;
+  options: { id: number; label: string; votes: number; votedByMe: boolean }[];
+  /** The option you voted for this round, or null. */
+  myVote: number | null;
+  /** You may ask the storyteller for options and continue with the winner (you play in it, or you made it). */
+  canSteer: boolean;
+  /** You may vote (an active member, and the story is open). */
+  canVote: boolean;
+};
+
 // ───────────────────────────── Redesign (social.ts) ─────────────────────────────
 
 /** The fixed list of interests people pick during onboarding. The key is what is saved. */

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkScene, cleanReply, draftPrompt, endingPrompt, narrationPrompt, parseDraft, recentStory, storytellerRules } from "./roleplay.ts";
+import { BRANCH_COUNT, branchPrompt, checkScene, cleanReply, draftPrompt, endingPrompt, narrationPrompt, parseBranches, parseDraft, recentStory, storytellerRules } from "./roleplay.ts";
 
 const scene = {
   title: "The ship that made it",
@@ -28,7 +28,8 @@ test("a scene needs a title, a premise and at least one character; duplicates an
 test("the storyteller is told the 18+ audience, the content limits, and to write original prose only", () => {
   const rules = storytellerRules();
   assert.match(rules, /18\+/);
-  assert.match(rules, /no sexual content/);
+  assert.match(rules, /no explicit sexual content/);
+  assert.match(rules, /under 18/);
   assert.match(rules, /ORIGINAL prose/);
   assert.match(rules, /Never copy lines, lyrics/);
 });
@@ -76,4 +77,17 @@ test("drafts are read from JSON even with code fences around them", () => {
   assert.throws(() => parseDraft("no json here"), /could not be read/);
   assert.throws(() => parseDraft('{"title": "ok title", "premise": "x"}'), /Describe/);
   assert.match(draftPrompt("Harry Potter", "Neville is chosen")[1]!.content, /JSON only/);
+});
+
+test("branch options: numbering and bullets are stripped, repeats and blanks dropped, at most three kept", () => {
+  const parsed = parseBranches("1. A storm hits the harbour\n- A stranger offers a deal\n\n2) a storm hits the harbour\nOption 3: The lights go out across the city\nA fourth idea nobody asked for");
+  assert.deepEqual(parsed, ["A storm hits the harbour", "A stranger offers a deal", "The lights go out across the city"]);
+  assert.equal(parseBranches("<think>hmm</think>\nok").length, 0);
+});
+
+test("the branch prompt asks for exactly the number of options the server stores", () => {
+  const messages = branchPrompt(scene, [], [{ kind: "narration", character: "", body: "The ship docks." }]);
+  assert.equal(messages[0]!.role, "system");
+  assert.match(messages[1]!.content, new RegExp(`exactly ${BRANCH_COUNT} different directions`));
+  assert.match(messages[1]!.content, /The ship docks\./);
 });

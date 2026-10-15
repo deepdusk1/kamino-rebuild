@@ -218,7 +218,7 @@ type SceneRow = {
   held: boolean;
 };
 
-async function loadScene(sql: Sql, sceneId: number) {
+export async function loadScene(sql: Sql, sceneId: number) {
   const row = (await sql<SceneRow>`select * from roleplay_scenes where id = ${sceneId}`)[0];
   if (!row) throw new Error("Story not found.");
   row.held = asBool(row.held);
@@ -234,7 +234,7 @@ async function loadScene(sql: Sql, sceneId: number) {
 }
 
 /** The viewer may read the scene's community. Returns the viewer's membership. */
-async function requireSceneRead(sql: Sql, userId: string | null, communityId: string) {
+export async function requireSceneRead(sql: Sql, userId: string | null, communityId: string) {
   const community = await requireCommunity(sql, communityId);
   const m = await membershipOf(sql, userId, communityId);
   if (!canRead(community, m)) throw new Error("This community is private.");
@@ -242,16 +242,16 @@ async function requireSceneRead(sql: Sql, userId: string | null, communityId: st
 }
 
 /** The viewer may write in the scene: an active member who is not muted and passed the age check. */
-async function requireScenePlay(sql: Sql, userId: string, communityId: string) {
+export async function requireScenePlay(sql: Sql, userId: string, communityId: string) {
   await requireMinAge(sql, userId);
   const m = await requireActiveMember(sql, userId, communityId);
   await assertNotMuted(sql, userId, communityId);
   return m;
 }
 
-async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnForPrompt[]> {
+export async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnForPrompt[]> {
   const rows = await sql<{ kind: string; character_name: string; body: string }>`
-    select kind, character_name, body from roleplay_turns where scene_id = ${sceneId} and held = false order by id desc limit 60
+    select kind, character_name, body from roleplay_turns where scene_id = ${sceneId} and held = false and rewound_at is null order by id desc limit 60
   `;
   return rows
     .reverse()
@@ -263,7 +263,7 @@ async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnForPrompt[
 }
 
 /** Asks the storyteller for narration or an ending, saves it (after the safety check) and returns the new turn's id. */
-async function storytellerWrites(
+export async function storytellerWrites(
   sql: Sql,
   scene: Awaited<ReturnType<typeof loadScene>>,
   kind: "narration" | "ending",
@@ -311,7 +311,7 @@ async function storytellerWrites(
 }
 
 /** Runs the storyteller but never lets its failure undo what the member did; returns a message to show instead. */
-async function tryStoryteller(run: () => Promise<unknown>): Promise<string | null> {
+export async function tryStoryteller(run: () => Promise<unknown>): Promise<string | null> {
   try {
     await run();
     return null;
@@ -350,8 +350,8 @@ export const listScenes = createServerFn({ method: "GET" })
       `select s.*,
          coalesce(m.nickname, pr.display_name, 'Member') as creator_name,
          (select count(*)::int from roleplay_cast c where c.scene_id = s.id) as cast_count,
-         (select count(*)::int from roleplay_turns t where t.scene_id = s.id and t.held = false) as turn_count,
-         (select count(*)::int from roleplay_turns t where t.scene_id = s.id and t.held = false and t.kind = 'ending') as ending_count
+         (select count(*)::int from roleplay_turns t where t.scene_id = s.id and t.held = false and t.rewound_at is null) as turn_count,
+         (select count(*)::int from roleplay_turns t where t.scene_id = s.id and t.held = false and t.rewound_at is null and t.kind = 'ending') as ending_count
        from roleplay_scenes s
        left join memberships m on m.user_id = s.creator_id and m.community_id = s.community_id
        left join profiles pr on pr.user_id = s.creator_id
@@ -385,7 +385,7 @@ export const getScene = createServerFn({ method: "GET" })
        from roleplay_turns t
        left join memberships m on m.user_id = t.author_user_id and m.community_id = $2
        left join profiles pr on pr.user_id = t.author_user_id
-       where t.scene_id = $1 and t.held = false
+       where t.scene_id = $1 and t.held = false and t.rewound_at is null
        order by t.id
        limit 400`,
       [data.sceneId, scene.row.community_id],
@@ -698,7 +698,7 @@ export const writeEnding = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-async function requireSceneManager(sql: Sql, userId: string, sceneId: number) {
+export async function requireSceneManager(sql: Sql, userId: string, sceneId: number) {
   const scene = await loadScene(sql, sceneId);
   if (scene.row.creator_id === userId) return scene;
   const m = await membershipOf(sql, userId, scene.row.community_id);
