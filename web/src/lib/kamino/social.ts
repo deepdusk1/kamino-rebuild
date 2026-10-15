@@ -13,6 +13,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { optionalAuth, type Viewer } from "./optional-auth";
 import { internals } from "./server";
 import { paidResourceAccessSql } from "./billing-policy";
+import { communityMatchScore, containsPattern, escapeLike, longEnough, parseSearchQuery, personMatchScore, prefixPattern } from "./search-text";
 import { guard } from "./guard";
 import { canLead, scanText } from "./safety";
 import { isSiteAdmin, takeDown } from "./safety.server";
@@ -373,7 +374,8 @@ async function roomCards(
     where += ` and r.community_id = $${params.length}`;
   }
   if (options.search) {
-    params.push(`%${options.search}%`);
+    // Already an escaped ILIKE pattern (see containsPattern in search-text.ts).
+    params.push(options.search);
     where += ` and (r.name ilike $${params.length} or r.topic ilike $${params.length} or c.name ilike $${params.length})`;
   }
   const rows = await sql.query<Row>(
@@ -692,19 +694,12 @@ export const exploreOverview = createServerFn({ method: "GET" })
 type SearchKind = "all" | "people" | "communities" | "posts" | "tags" | "rooms" | "events";
 type SearchSort = "relevance" | "trending" | "new" | "growing" | "members";
 
-/** Remembers a search (the last 20, without repeats). */
-async function rememberSearch(sql: Sql, userId: string, query: string) {
-  await sql`delete from recent_searches where user_id = ${userId} and lower(query) = ${query.toLowerCase()}`;
-  await sql`insert into recent_searches (user_id, query) values (${userId}, ${query})`;
-  await sql`delete from recent_searches where user_id = ${userId} and id not in (
-    select id from recent_searches where user_id = ${userId} order by at desc, id desc limit 20)`;
-}
-
 /**
  * One search for everything: people, communities, posts, tags, live rooms and events. Small typos still find things
- * (letter-triple similarity when the plain match finds nothing). Signed-in searches are remembered in
- * `recentSearches`. Filters: `category` (chip), `sort`, `minMembers`, `language`, and `safe` (leaves out 16+
- * communities and posts with content warnings).
+ * (letter-triple similarity when the plain match finds nothing). `@name` searches people only; `#tag` searches tags.
+ * Signed-in searches from the main search box (`kind: "all"`) are remembered in `recentSearches` (one entry per search,
+ * not one per pause while typing). Filters: `category` (chip), `sort`, `minMembers`, `language`, and `safe` (leaves
+ * out communities and posts with content warnings; every community is 18+, so age is not a filter here).
  */
 export const searchEverything = createServerFn({ method: "GET" })
   .middleware([optionalAuth])
@@ -714,7 +709,7 @@ export const searchEverything = createServerFn({ method: "GET" })
       kind: (["all", "people", "communities", "posts", "tags", "rooms", "events"] as const).includes(d?.kind as SearchKind) ? (d.kind as SearchKind) : "all",
       category: typeof d?.category === "string" ? d.category.trim().slice(0, 30) : "",
       sort: (["relevance", "trending", "new", "growing", "members"] as const).includes(d?.sort as SearchSort) ? (d.sort as SearchSort) : "relevance",
-      minMembers: Math.max(0, Math.floor(Number(d?.minMembers) || 0)),
+      minMembers: Math.min(10_000_000, Math.max(0, Math.floor(Number(d?.minMembers) || 0))),
       language: typeof d?.language === "string" ? d.language.trim().toLowerCase().slice(0, 8) : "",
       safe: Boolean(d?.safe),
     }),
@@ -722,29 +717,39 @@ export const searchEverything = createServerFn({ method: "GET" })
   .handler(async ({ context, data }): Promise<SearchEverything> => {
     const sql = await db();
     const ctx = await viewerContext(sql, viewerId(context));
-    const result: SearchEverything = { query: data.q, people: [], communities: [], posts: [], tags: [], rooms: [], events: [], fuzzy: false };
-    const isTag = data.q.startsWith("#");
-    const term = data.q.replace(/^#/, "").toLowerCase().replace(/[%_\\]/g, "");
+    const parsed = parseSearchQuery(data.q);
+    const { isTag, isHandle, term } = parsed;
+    const result: SearchEverything = { query: parsed.query, people: [], communities: [], posts: [], tags: [], rooms: [], events: [], fuzzy: false };
     // A filter-only browse (no words, but a category or sort) still lists communities.
-    const browsing = !term && (data.category || data.sort !== "relevance" || data.minMembers || data.language);
-    if (term.length < 2 && !browsing) return result;
-    if (ctx.userId && term.length >= 2) await rememberSearch(sql, ctx.userId, data.q);
-    const like = `%${term}%`;
-    const want = (k: SearchKind) => data.kind === "all" || data.kind === k;
+    const browsing = !term && !isTag && !isHandle && Boolean(data.category || data.sort !== "relevance" || data.minMembers || data.language || data.safe);
+    const searching = longEnough(term);
+    if (!searching && !browsing) return result;
+    if (ctx.userId && searching && data.kind === "all") {
+      const { rememberSearch } = await import("./search-history.server");
+      await rememberSearch(sql, ctx.userId, parsed.query);
+    }
+    const like = containsPattern(term);
+    // "@name" looks for people only.
+    const want = (k: SearchKind) => (data.kind === "all" || data.kind === k) && (!isHandle || k === "people");
     const viewer = ctx.userId ?? "";
 
     if (want("communities") && !isTag) {
       const stats = await communityStats(sql);
-      let list = (await discoverable(sql, ctx)).filter(
+      const publicOnes = await discoverable(sql, ctx);
+      // Members can also find their own private and unlisted communities.
+      const ownIds = [...ctx.joined].filter((id) => !publicOnes.some((c) => c.id === id));
+      const own = ownIds.length
+        ? (await sql.query<Row>(`select * from communities where id = any($1) and visibility <> 'public'`, [ownIds])).map(mapCommunity)
+        : [];
+      let list = [...publicOnes, ...own].filter(
         (c) =>
           fitsCategory(c, data.category || undefined) &&
           c.memberCount >= data.minMembers &&
           (!data.language || c.language.toLowerCase() === data.language) &&
-          (!data.safe || (c.ageGate < 16 && !c.contentWarnings.length)),
+          (!data.safe || !c.contentWarnings.length),
       );
-      const plain = (c: Community) =>
-        !term || [c.name, c.tagline, c.description, c.category, ...c.topics].some((t) => t.toLowerCase().includes(term));
-      let matched = list.filter(plain);
+      const score = new Map(list.map((c) => [c.id, communityMatchScore(c, term)]));
+      let matched = term ? list.filter((c) => (score.get(c.id) ?? 0) > 0) : list;
       if (!matched.length && term.length >= 3) {
         matched = list
           .map((c) => ({ c, s: Math.max(fuzzyScore(term, c.name), ...c.topics.map((t) => fuzzyScore(term, t))) }))
@@ -756,55 +761,71 @@ export const searchEverything = createServerFn({ method: "GET" })
       list = matched;
       const st = (c: Community) => stats.get(c.id);
       const sorters: Record<SearchSort, (a: Community, b: Community) => number> = {
-        relevance: (a, b) => Number(b.name.toLowerCase().includes(term)) - Number(a.name.toLowerCase().includes(term)) || b.memberCount - a.memberCount,
-        trending: (a, b) => (st(b)?.trending ?? 0) - (st(a)?.trending ?? 0),
+        // Best match first (exact name, name start, word in name, topic...), then the bigger community.
+        relevance: (a, b) => (score.get(b.id) ?? 0) - (score.get(a.id) ?? 0) || b.memberCount - a.memberCount || a.name.localeCompare(b.name),
+        trending: (a, b) => (st(b)?.trending ?? 0) - (st(a)?.trending ?? 0) || b.memberCount - a.memberCount,
         new: (a, b) => b.createdAt.localeCompare(a.createdAt),
-        growing: (a, b) => (st(b)?.newMembers14 ?? 0) - (st(a)?.newMembers14 ?? 0),
+        growing: (a, b) => (st(b)?.newMembers14 ?? 0) - (st(a)?.newMembers14 ?? 0) || b.memberCount - a.memberCount,
         members: (a, b) => b.memberCount - a.memberCount,
       };
       if (!result.fuzzy || data.sort !== "relevance") list.sort(sorters[data.sort]);
       result.communities = await toCards(sql, list.slice(0, 20), ctx);
     }
 
-    if (want("people") && !isTag && term.length >= 2) {
+    if (want("people") && !isTag && searching) {
+      // Adults who passed the age check, chose to be findable, and aren't suspended. Blocks are left out below.
+      const findable = `p.search_visible = true and (p.min_age_confirmed_at is not null or p.user_id like 'seed:%')
+        and not exists(select 1 from identity_account_status s where s.user_id = p.user_id and s.status <> 'active' and (s.until is null or s.until > now()))`;
       let rows = await sql.query<Row>(
         `select ${CREATOR_COLUMNS}, p.last_seen_at, p.show_online from profiles p
-         where p.search_visible=true and (p.handle ilike $1 or p.display_name ilike $1 or p.headline ilike $1)
-           and not exists(select 1 from identity_account_status s where s.user_id=p.user_id and s.status<>'active' and (s.until is null or s.until>now()))
-         order by (p.handle ilike $2) desc, p.verified desc, followers desc, p.rep desc limit 30`,
-        [like, `${term}%`],
+         where ${findable} and (p.handle ilike $1 or p.display_name ilike $1 ${isHandle ? "" : "or p.headline ilike $1"})
+         order by (lower(p.handle) = $2) desc, (p.handle ilike $3) desc, (p.display_name ilike $3) desc, p.verified desc, followers desc, p.rep desc
+         limit 60`,
+        [like, term, prefixPattern(term)],
       );
       if (!rows.length && term.length >= 3) {
-        const pool = await sql.query<Row>(`select ${CREATOR_COLUMNS}, p.last_seen_at, p.show_online from profiles p where p.search_visible=true and not exists(select 1 from identity_account_status s where s.user_id=p.user_id and s.status<>'active' and (s.until is null or s.until>now())) order by p.rep desc limit 1500`);
-        rows = pool
-          .map((r) => ({ r, s: Math.max(fuzzyScore(term, String(r.handle)), fuzzyScore(term, String(r.display_name))) }))
+        // Typos: score names in memory, then load the full rows of the best few (not 1,500 follower counts).
+        const pool = await sql.query<Row>(`select p.user_id, p.handle, p.display_name from profiles p where ${findable} order by p.rep desc limit 2000`);
+        const best = pool
+          .map((r) => ({ id: String(r.user_id), s: Math.max(fuzzyScore(term, String(r.handle)), fuzzyScore(term, String(r.display_name))) }))
           .filter((x) => x.s >= 0.3)
           .sort((a, b) => b.s - a.s)
-          .slice(0, 20)
-          .map((x) => x.r);
-        if (rows.length) result.fuzzy = true;
+          .slice(0, 20);
+        if (best.length) {
+          const full = await sql.query<Row>(`select ${CREATOR_COLUMNS}, p.last_seen_at, p.show_online from profiles p where p.user_id = any($1)`, [best.map((x) => x.id)]);
+          const byId = new Map(full.map((r) => [String(r.user_id), r]));
+          rows = best.map((x) => byId.get(x.id)).filter((r): r is Row => Boolean(r));
+          result.fuzzy = rows.length > 0;
+        }
+      } else {
+        const rank = (r: Row) => personMatchScore({ handle: String(r.handle), displayName: String(r.display_name), headline: String(r.headline ?? "") }, term);
+        rows = rows.map((r, i) => ({ r, i, s: rank(r) })).sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.r);
       }
       rows = rows.filter((r) => !ctx.blocked.has(String(r.user_id))).slice(0, 20);
       const cards = await creatorCards(sql, rows, ctx);
       const followsYou = await followersOfViewer(sql, ctx.userId, cards.map((c) => c.userId));
-      result.people = cards.map((c, i) => ({
-        userId: c.userId,
-        handle: c.handle,
-        displayName: c.displayName,
-        avatarHue: c.avatarHue,
-        avatarV: c.avatarV,
-        headline: c.headline,
-        verified: c.verified,
-        online: isOnlineNow(rows[i]!.last_seen_at ? iso(rows[i]!.last_seen_at) : null, rows[i]!.show_online == null ? true : asBool(rows[i]!.show_online)),
-        following: c.following,
-        followsYou: followsYou.has(c.userId),
-        requested: c.requested,
-        creator: c.creator,
-        followers: c.followers,
-      }));
+      const rowById = new Map(rows.map((r) => [String(r.user_id), r]));
+      result.people = cards.map((c) => {
+        const row = rowById.get(c.userId);
+        return {
+          userId: c.userId,
+          handle: c.handle,
+          displayName: c.displayName,
+          avatarHue: c.avatarHue,
+          avatarV: c.avatarV,
+          headline: c.headline,
+          verified: c.verified,
+          online: isOnlineNow(row?.last_seen_at ? iso(row.last_seen_at) : null, row?.show_online == null ? true : asBool(row.show_online)),
+          following: c.following,
+          followsYou: followsYou.has(c.userId),
+          requested: c.requested,
+          creator: c.creator,
+          followers: c.followers,
+        };
+      });
     }
 
-    if (want("posts") && term.length >= 2) {
+    if (want("posts") && searching) {
       const rows = await sql.query<Row>(
         `select ${POST_SELECT}, ${POST_COMMUNITY_COLUMNS}
          ${POST_JOIN}
@@ -815,49 +836,56 @@ export const searchEverything = createServerFn({ method: "GET" })
            and coalesce(p.hidden, false) = false and (p.expires_at is null or p.expires_at > now())
            and (p.type <> 'wiki' or p.wiki_status = 'approved') and p.type <> 'story'
            and ${visiblePosts("$1")}
-           ${data.safe ? "and p.content_warning = '' and com.age_gate < 16" : ""}
-         order by ${data.sort === "new" ? "p.created_at desc" : "p.like_count + 2 * p.comment_count desc, p.created_at desc"}
+           ${data.safe ? "and coalesce(p.content_warning, '') = '' and coalesce(com.content_warnings, '[]') = '[]'" : ""}
+         order by ${
+           data.sort === "new"
+             ? "p.created_at desc"
+             : // A match in the title counts most, then likes and comments, then the newest.
+               `${isTag ? "" : "(p.title ilike $2) desc, "}p.like_count + 2 * p.comment_count desc, p.created_at desc`
+         }, p.id desc
          limit 40`,
-        [viewer, isTag ? `%"${term}"%` : like],
+        [viewer, isTag ? `%"${escapeLike(term)}"%` : like],
       );
       result.posts = (await postCards(sql, rows, ctx)).slice(0, 25);
     }
 
-    if (want("tags") && term.length >= 2) {
+    if (want("tags") && searching) {
       const rows = await sql.query<{ hashtags: string }>(
         `select p.hashtags from posts p join communities com on com.id = p.community_id
          where p.hashtags ilike $2 and com.visibility = 'public' and coalesce(p.hidden, false) = false and ${visiblePosts("$1")}
          order by p.created_at desc limit 2000`,
-        [viewer, `%${term.slice(0, 3)}%`],
+        [viewer, containsPattern(term.slice(0, 3))],
       );
       const counts = new Map<string, number>();
       for (const r of rows) for (const tag of parseJson<string[]>(r.hashtags, [])) counts.set(tag, (counts.get(tag) ?? 0) + 1);
       result.tags = [...counts.entries()]
-        .map(([tag, count]) => ({ tag, count, s: tag.includes(term) ? 1 + (tag.startsWith(term) ? 1 : 0) : fuzzyScore(term, tag) }))
+        .map(([tag, count]) => ({ tag, count, s: tag.includes(term) ? 1 + (tag.startsWith(term) ? 1 : 0) + (tag === term ? 1 : 0) : fuzzyScore(term, tag) }))
         .filter((x) => x.s >= 0.35)
         .sort((a, b) => b.s - a.s || b.count - a.count)
         .slice(0, 20)
         .map(({ tag, count }) => ({ tag, count }));
     }
 
-    if (want("rooms") && term.length >= 2 && !isTag) {
-      result.rooms = await roomCards(sql, ctx, { scope: "all", onlyLive: false, kinds: ["voice", "screening", "public"], search: term, limit: 20 });
+    if (want("rooms") && searching && !isTag) {
+      result.rooms = await roomCards(sql, ctx, { scope: "all", onlyLive: false, kinds: ["voice", "screening", "public"], search: like, limit: 20 });
     }
 
-    if (want("events") && term.length >= 2 && !isTag) {
+    if (want("events") && searching && !isTag) {
       const rows = await sql.query<Row>(
         `select e.*, com.name as community_name,
-                (select count(*)::int from event_rsvps r where r.event_id = e.id) as rsvp_count, 0 as entry_count, null as my_entry_post_id
+                (select count(*)::int from event_rsvps r where r.event_id = e.id and r.response = 'going') as rsvp_count, 0 as entry_count, null as my_entry_post_id
          from events e join communities com on com.id = e.community_id
-         where (e.title ilike $2 or e.body ilike $2) and ${READABLE_COMMUNITY("$1")}
+         where (e.title ilike $2 or e.body ilike $2 or e.location ilike $2) and ${READABLE_COMMUNITY("$1")}
            and e.status<>'cancelled' and ${paidResourceAccessSql('$1','event','e.id')}
            and (com.visibility = 'public' or exists (select 1 from memberships am where am.community_id = com.id and am.user_id = $1 and am.status = 'active'))
            and coalesce(e.ends_at, e.starts_at + interval '3 hours') > now()
-         order by e.starts_at asc limit 20`,
+         order by (e.title ilike $2) desc, e.starts_at asc limit 20`,
         [viewer, like],
       );
       const going = new Set(
-        ctx.userId ? (await sql<{ event_id: number }>`select event_id from event_rsvps where user_id = ${ctx.userId}`).map((r) => Number(r.event_id)) : [],
+        ctx.userId && rows.length
+          ? (await sql<{ event_id: number }>`select event_id from event_rsvps where user_id = ${ctx.userId} and response = 'going'`).map((r) => Number(r.event_id))
+          : [],
       );
       result.events = rows.map((r) => ({ ...mapHallEvent(r, going.has(Number(r.id))), communityName: String(r.community_name) }));
     }

@@ -14,6 +14,7 @@ import { ADULT_AGE, MINIMUM_AGE, checkBirthDate } from "./age";
 import { canLead, canModerate, scanText } from "./safety";
 import { mapCommunity, mapPost } from "./map";
 import type { Community, Post } from "./types";
+import { containsPattern, escapeLike, longEnough, parseSearchQuery } from "./search-text";
 import { deleteMedia, loadMedia, storeMedia } from "./media-store.server";
 
 type Authed = { userId: string };
@@ -679,24 +680,24 @@ export const searchAll = createServerFn({ method: "GET" })
   .handler(async ({ context, data: raw }): Promise<SearchResults> => {
     const v = context as unknown as Viewer;
     const sql = await db();
-    const query = String(raw ?? "").trim().slice(0, 60);
+    const { query, isTag, term } = parseSearchQuery(raw);
     const empty: SearchResults = { query, communities: [], posts: [], people: [] };
-    if (query.replace(/^#/, "").length < 2) return empty;
-
-    const isTag = query.startsWith("#");
-    const term = query.replace(/^#/, "").toLowerCase().replace(/[%_\\]/g, "");
-    if (term.length < 2) return empty;
-    const like = `%${term}%`;
+    if (!longEnough(term)) return empty;
+    // `%` and `_` are searched as themselves (escaped), not dropped or treated as "anything".
+    const like = containsPattern(term);
     const blocked = [...(await blockedSet(sql, v.userId))];
 
     const communities = isTag
       ? []
       : (
-          await sql`
-            select * from communities
-            where visibility = 'public' and (name ilike ${like} or tagline ilike ${like} or description ilike ${like} or category ilike ${like})
-            order by (name ilike ${like}) desc, member_count desc
-            limit 8`
+          await sql.query(
+            `select * from communities c
+             where c.visibility = 'public' and ${internals.communityMetadataAccessSql("$2")}
+               and (c.name ilike $1 or c.tagline ilike $1 or c.description ilike $1 or c.category ilike $1)
+             order by (c.name ilike $1) desc, c.member_count desc
+             limit 8`,
+            [like, v.userId ?? ""],
+          )
         ).map(mapCommunity);
 
     // Posts: public communities, plus communities the viewer belongs to.
@@ -714,7 +715,7 @@ export const searchAll = createServerFn({ method: "GET" })
          and ${internals.visiblePosts("$1")}
        order by p.like_count desc, p.created_at desc
        limit 40`,
-      [v.userId ?? "", isTag ? `%"${term}"%` : like],
+      [v.userId ?? "", isTag ? `%"${escapeLike(term)}"%` : like],
     );
     // Posts by people you muted are left out (the people search below still finds them, so you can unmute).
     const muted = await mutedSet(sql, v.userId);
@@ -731,8 +732,10 @@ export const searchAll = createServerFn({ method: "GET" })
       ? []
       : await sql`
           select user_id, handle, display_name, avatar_hue, avatar_version, rep from profiles
-          where handle ilike ${like} or display_name ilike ${like}
-          order by rep desc limit 15`;
+          where (handle ilike ${like} or display_name ilike ${like})
+            and search_visible = true and (min_age_confirmed_at is not null or user_id like 'seed:%')
+            and not exists (select 1 from identity_account_status s where s.user_id = profiles.user_id and s.status <> 'active' and (s.until is null or s.until > now()))
+          order by (lower(handle) = ${term}) desc, rep desc limit 15`;
     const people = peopleRows
       .filter((r) => !blocked.includes(String(r.user_id)))
       .slice(0, 10)

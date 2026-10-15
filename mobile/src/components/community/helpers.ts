@@ -76,6 +76,16 @@ export type SearchFilters = {
 
 export const DEFAULT_FILTERS: SearchFilters = { category: "", language: "", minMembers: 0, sort: "relevance", safe: false };
 
+/**
+ * Whether the search box has enough to search: two letters after any leading # or @ (one is enough in Chinese,
+ * Japanese or Korean), or no words but some filters (then communities are browsed). Matches the server's rule.
+ */
+export function searchReady(query: string, filterCount: number): boolean {
+  const term = query.trim().replace(/^[#@]+/, "").trim();
+  if (!term) return !query.trim() && filterCount > 0;
+  return term.length >= 2 || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(term);
+}
+
 /** How many filters differ from the defaults (shows the dot on the filter button). */
 export function activeFilterCount(f: SearchFilters): number {
   return [f.category !== "", f.language !== "", f.minMembers > 0, f.sort !== "relevance", f.safe].filter(Boolean).length;
@@ -130,4 +140,35 @@ export function cleanTag(tag: string): string {
 export function tagLabel(tag: string): string {
   const t = cleanTag(tag);
   return t ? `#${t.charAt(0).toUpperCase()}${t.slice(1)}` : "";
+}
+
+export type ResultTab = "people" | "communities" | "posts" | "tags" | "rooms" | "events";
+
+type ResultLists = {
+  people: { handle: string; displayName: string }[];
+  communities: { name: string }[];
+  posts: unknown[];
+  tags: unknown[];
+  rooms: unknown[];
+  events: unknown[];
+};
+
+/**
+ * Which search tab to open first when the person hasn't picked one: the most useful one that has results. "#tag"
+ * opens posts, "@name" opens people, and an exact username or name match (with no community of that exact name)
+ * opens people too.
+ */
+export function bestTab(r: ResultLists | undefined, query: string): ResultTab {
+  const isTag = query.startsWith("#");
+  if (query.startsWith("@")) return "people";
+  if (!r) return isTag ? "posts" : "communities";
+  const term = query.trim().toLowerCase();
+  const exactPerson = !isTag && r.people.some((p) => p.handle.toLowerCase() === term || p.displayName.toLowerCase() === term);
+  const exactCommunity = !isTag && r.communities.some((c) => c.name.toLowerCase() === term);
+  const order: ResultTab[] = isTag
+    ? ["posts", "tags", "communities", "people", "rooms", "events"]
+    : exactPerson && !exactCommunity
+      ? ["people", "communities", "posts", "tags", "rooms", "events"]
+      : ["communities", "posts", "people", "tags", "rooms", "events"];
+  return order.find((k) => r[k].length > 0) ?? order[0]!;
 }

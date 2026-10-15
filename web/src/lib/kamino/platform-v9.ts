@@ -9,6 +9,7 @@ import { guard } from "./guard";
 import { aiConfig, chatComplete } from "./ai.server";
 import { platformFlagActive } from "./platform-flags.server";
 import { evaluatePlatformFlag } from "./platform-flag-rules";
+import { parseSearchQuery, prefixPattern } from "./search-text";
 
 type Row = Record<string, string | number | boolean | null | Date>;
 type Sql = Awaited<ReturnType<typeof internals.db>>;
@@ -353,13 +354,18 @@ export const searchSuggestions = createServerFn({ method: "GET" })
   .handler(async ({ context, data }) => {
     const sql = await internals.db(),
       userId = uid(context);
+    // Typed `%` and `_` are matched literally; a leading # or @ is ignored.
+    const { term } = parseSearchQuery(data.query);
+    if (!term) return { communities: [] as Row[], people: [] as Row[] };
+    const prefix = prefixPattern(term);
     const communities = await sql.query<Row>(
-      `select c.id,c.name,c.category from communities c where ${access("$1")} and c.visibility='public' and c.name ilike $2 order by c.member_count desc limit 6`,
-      [userId, `${data.query}%`],
+      `select c.id,c.name,c.category from communities c where ${internals.communityMetadataAccessSql("$1")} and c.visibility='public' and c.name ilike $2 order by c.member_count desc limit 6`,
+      [userId, prefix],
     );
     const people =
-      await sql<Row>`select handle,display_name from profiles p where (handle ilike ${`${data.query}%`} or display_name ilike ${`${data.query}%`})
+      await sql<Row>`select handle,display_name from profiles p where (handle ilike ${prefix} or display_name ilike ${prefix})
       and p.private_account=false and p.search_visible=true and p.user_id<>${userId}
+      and (p.min_age_confirmed_at is not null or p.user_id like 'seed:%')
       and not exists(select 1 from identity_account_status s where s.user_id=p.user_id and s.status<>'active' and (s.until is null or s.until>now()))
       and not exists(select 1 from blocks b where (b.blocker_id=${userId} and b.blocked_id=p.user_id) or (b.blocked_id=${userId} and b.blocker_id=p.user_id)) limit 6`;
     return { communities, people };
