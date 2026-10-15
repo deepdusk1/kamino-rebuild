@@ -59,9 +59,6 @@ type ChatsOverviewPayload = {
   requests: number;
 };
 
-type OpenDmRpcResult = {
-  roomId: number;
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -437,15 +434,9 @@ export default function ChatsTabScreen() {
     if (!target || startingDm) return;
     setStartingDm(true);
     try {
-      let roomId: number | null = null;
-      try {
-        const profile = await api.profileOverview(target);
-        const dm = await api.openDm(profile.profile.userId);
-        roomId = dm.roomId;
-      } catch {
-        const dm = await rpc<OpenDmRpcResult>("openDm", { userId: target });
-        roomId = dm.roomId;
-      }
+      // The box takes a @handle: look the person up, then open (or create) the conversation with them.
+      const profile = await api.profileOverview(target);
+      const { roomId } = await api.openDm(profile.profile.userId);
       setNewChatOpen(false);
       setRecipientInput("");
       haptic.success();

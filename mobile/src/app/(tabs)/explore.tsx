@@ -286,13 +286,7 @@ export default function Explore() {
     queryKey: ["events", primarySlug],
     queryFn: async (): Promise<ListEventsRpcResult> => {
       if (!primarySlug) return { events: [] };
-      try {
-        return await rpc<ListEventsRpcResult>("listEvents", {
-          slug: primarySlug,
-        });
-      } catch {
-        return await api.events(primarySlug);
-      }
+      return await api.events(primarySlug);
     },
     enabled: Boolean(primarySlug),
     staleTime: 60_000,
@@ -303,15 +297,7 @@ export default function Explore() {
     queryKey: ["rank", primarySlug, "activity", "week"],
     queryFn: async (): Promise<CommunityRankRpcResult> => {
       if (!primarySlug) return { rank: [] };
-      try {
-        return await rpc<CommunityRankRpcResult>("communityRank", {
-          slug: primarySlug,
-          metric: "activity",
-          window: "week",
-        });
-      } catch {
-        return await api.board(primarySlug, "activity", "week");
-      }
+      return await api.board(primarySlug, "activity", "week");
     },
     enabled: Boolean(primarySlug),
     staleTime: 60_000,
@@ -590,7 +576,7 @@ export default function Explore() {
         verified: entry.role === "leader" || entry.role === "agent",
         creator: false,
         headline: `${compactNumber(entry.rep)} rep`,
-        followers: entry.weekLikes,
+        followers: 0,
         following: false,
         requested: false,
       });

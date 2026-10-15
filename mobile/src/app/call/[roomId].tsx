@@ -85,20 +85,12 @@ export default function CallScreen() {
     retry: 1,
     queryFn: async (): Promise<LiveKitJoinInfo | null> => {
       try {
-        const res = await rpc<LiveKitJoinInfo>("getLiveKitJoin", { roomId });
-        if (res && typeof res.url === "string" && typeof res.token === "string") {
-          return res;
-        }
+        const join = await api.getLiveKitJoin(roomId);
+        return join.enabled ? { url: join.url, token: join.token } : null;
       } catch {
-        // Fallback to api.getLiveKitJoin wrapper
+        // No LiveKit server configured: `useCall` falls back to the peer-to-peer WebRTC call (`/api/rtc`).
+        return null;
       }
-      try {
-        const fb = await api.getLiveKitJoin(roomId);
-        if (fb.enabled) return { url: fb.url, token: fb.token };
-      } catch {
-        // When LiveKit SFU is not configured, `useCall` activates the P2P WebRTC fallback (`CallSession` / `/api/rtc`)
-      }
-      return null;
     },
   });
 

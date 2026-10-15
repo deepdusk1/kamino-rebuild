@@ -22,7 +22,9 @@ type Sql = Awaited<ReturnType<typeof internals.db>>;
 type Authed = { userId: string };
 
 export function hashBotToken(token: string): string {
-  // Server-only: uses node:crypto, called from server functions and the bot route.
+  // Server-only: uses node:crypto, called from server functions and the bot route. A lazy require keeps
+  // node:crypto out of the browser bundle, which also imports this module for its server-function stubs.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { createHash } = require("node:crypto");
   return createHash("sha256").update(token).digest("hex");
 }
@@ -49,6 +51,7 @@ export const createBotToken = createServerFn({ method: "POST" })
     const sql = await db();
     const { userId } = context as Authed;
     const name = String(data.name ?? "").trim().slice(0, 60) || "Unnamed bot";
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- see hashBotToken
     const { randomBytes } = require("node:crypto");
     const token = `kamino_bot_${randomBytes(32).toString("hex")}`;
     const rows = await sql<{ id: number }>`

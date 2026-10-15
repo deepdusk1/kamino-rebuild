@@ -74,6 +74,7 @@ import { Route as CSlugWikiRouteImport } from './routes/c/$slug/wiki'
 import { Route as ApiV1AuthMobileCallbackRouteImport } from './routes/api/v1/auth/mobile-callback'
 import { Route as ApiV1AuthMobileStartRouteImport } from './routes/api/v1/auth/mobile-start'
 import { Route as ApiV1BillingStripeWebhookRouteImport } from './routes/api/v1/billing/stripe-webhook'
+import { Route as ApiV1BotActionRouteImport } from './routes/api/v1/bot/$action'
 import { Route as ApiV1ContentMediaMediaIdRouteImport } from './routes/api/v1/content-media/$mediaId'
 import { Route as ApiV1LibraryMediaLibraryIdRouteImport } from './routes/api/v1/library-media/$libraryId'
 import { Route as ApiV1ProfileStoryMediaStoryIdRouteImport } from './routes/api/v1/profile-story-media/$storyId'
@@ -413,6 +414,11 @@ const ApiV1BillingStripeWebhookRoute =
     path: '/api/v1/billing/stripe-webhook',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiV1BotActionRoute = ApiV1BotActionRouteImport.update({
+  id: '/api/v1/bot/$action',
+  path: '/api/v1/bot/$action',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1ContentMediaMediaIdRoute =
   ApiV1ContentMediaMediaIdRouteImport.update({
     id: '/api/v1/content-media/$mediaId',
@@ -546,6 +552,7 @@ export interface FileRoutesByFullPath {
   '/api/v1/auth/mobile-callback': typeof ApiV1AuthMobileCallbackRoute
   '/api/v1/auth/mobile-start': typeof ApiV1AuthMobileStartRoute
   '/api/v1/billing/stripe-webhook': typeof ApiV1BillingStripeWebhookRoute
+  '/api/v1/bot/$action': typeof ApiV1BotActionRoute
   '/api/v1/content-media/$mediaId': typeof ApiV1ContentMediaMediaIdRoute
   '/api/v1/library-media/$libraryId': typeof ApiV1LibraryMediaLibraryIdRoute
   '/api/v1/profile-story-media/$storyId': typeof ApiV1ProfileStoryMediaStoryIdRoute
@@ -623,6 +630,7 @@ export interface FileRoutesByTo {
   '/api/v1/auth/mobile-callback': typeof ApiV1AuthMobileCallbackRoute
   '/api/v1/auth/mobile-start': typeof ApiV1AuthMobileStartRoute
   '/api/v1/billing/stripe-webhook': typeof ApiV1BillingStripeWebhookRoute
+  '/api/v1/bot/$action': typeof ApiV1BotActionRoute
   '/api/v1/content-media/$mediaId': typeof ApiV1ContentMediaMediaIdRoute
   '/api/v1/library-media/$libraryId': typeof ApiV1LibraryMediaLibraryIdRoute
   '/api/v1/profile-story-media/$storyId': typeof ApiV1ProfileStoryMediaStoryIdRoute
@@ -703,6 +711,7 @@ export interface FileRoutesById {
   '/api/v1/auth/mobile-callback': typeof ApiV1AuthMobileCallbackRoute
   '/api/v1/auth/mobile-start': typeof ApiV1AuthMobileStartRoute
   '/api/v1/billing/stripe-webhook': typeof ApiV1BillingStripeWebhookRoute
+  '/api/v1/bot/$action': typeof ApiV1BotActionRoute
   '/api/v1/content-media/$mediaId': typeof ApiV1ContentMediaMediaIdRoute
   '/api/v1/library-media/$libraryId': typeof ApiV1LibraryMediaLibraryIdRoute
   '/api/v1/profile-story-media/$storyId': typeof ApiV1ProfileStoryMediaStoryIdRoute
@@ -784,6 +793,7 @@ export interface FileRouteTypes {
     | '/api/v1/auth/mobile-callback'
     | '/api/v1/auth/mobile-start'
     | '/api/v1/billing/stripe-webhook'
+    | '/api/v1/bot/$action'
     | '/api/v1/content-media/$mediaId'
     | '/api/v1/library-media/$libraryId'
     | '/api/v1/profile-story-media/$storyId'
@@ -861,6 +871,7 @@ export interface FileRouteTypes {
     | '/api/v1/auth/mobile-callback'
     | '/api/v1/auth/mobile-start'
     | '/api/v1/billing/stripe-webhook'
+    | '/api/v1/bot/$action'
     | '/api/v1/content-media/$mediaId'
     | '/api/v1/library-media/$libraryId'
     | '/api/v1/profile-story-media/$storyId'
@@ -940,6 +951,7 @@ export interface FileRouteTypes {
     | '/api/v1/auth/mobile-callback'
     | '/api/v1/auth/mobile-start'
     | '/api/v1/billing/stripe-webhook'
+    | '/api/v1/bot/$action'
     | '/api/v1/content-media/$mediaId'
     | '/api/v1/library-media/$libraryId'
     | '/api/v1/profile-story-media/$storyId'
@@ -1006,6 +1018,7 @@ export interface RootRouteChildren {
   ApiV1AuthMobileCallbackRoute: typeof ApiV1AuthMobileCallbackRoute
   ApiV1AuthMobileStartRoute: typeof ApiV1AuthMobileStartRoute
   ApiV1BillingStripeWebhookRoute: typeof ApiV1BillingStripeWebhookRoute
+  ApiV1BotActionRoute: typeof ApiV1BotActionRoute
   ApiV1ContentMediaMediaIdRoute: typeof ApiV1ContentMediaMediaIdRoute
   ApiV1LibraryMediaLibraryIdRoute: typeof ApiV1LibraryMediaLibraryIdRoute
   ApiV1ProfileStoryMediaStoryIdRoute: typeof ApiV1ProfileStoryMediaStoryIdRoute
@@ -1474,6 +1487,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiV1BillingStripeWebhookRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/v1/bot/$action': {
+      id: '/api/v1/bot/$action'
+      path: '/api/v1/bot/$action'
+      fullPath: '/api/v1/bot/$action'
+      preLoaderRoute: typeof ApiV1BotActionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/content-media/$mediaId': {
       id: '/api/v1/content-media/$mediaId'
       path: '/api/v1/content-media/$mediaId'
@@ -1671,6 +1691,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiV1AuthMobileCallbackRoute: ApiV1AuthMobileCallbackRoute,
   ApiV1AuthMobileStartRoute: ApiV1AuthMobileStartRoute,
   ApiV1BillingStripeWebhookRoute: ApiV1BillingStripeWebhookRoute,
+  ApiV1BotActionRoute: ApiV1BotActionRoute,
   ApiV1ContentMediaMediaIdRoute: ApiV1ContentMediaMediaIdRoute,
   ApiV1LibraryMediaLibraryIdRoute: ApiV1LibraryMediaLibraryIdRoute,
   ApiV1ProfileStoryMediaStoryIdRoute: ApiV1ProfileStoryMediaStoryIdRoute,

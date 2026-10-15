@@ -126,8 +126,14 @@ const lines = [
   'import * as searchV10 from "../src/lib/kamino/search-v10";',
   'import * as watch from "../src/lib/kamino/watch";',
   'import * as referrals from "../src/lib/kamino/referrals";',
+  // Keep this list the same as the RPC registry in src/lib/kamino/mobile-api.ts.
+  'import * as money from "../src/lib/kamino/money";',
+  'import * as ageVerification from "../src/lib/kamino/age-verification";',
+  'import * as livekit from "../src/lib/kamino/livekit";',
+  'import * as gifs from "../src/lib/kamino/gifs";',
+  'import * as story from "../src/lib/kamino/story";',
   ...imports,
-  "const api = { ...core, ...extras, ...engagement, ...library, ...aiFeatures, ...social, ...identity, ...community, ...content, ...platform, ...billing, ...siteReports, ...platformAnalytics, ...profileStories, ...mediaV10, ...socialEventsV10, ...operationsV10, ...searchV10, ...watch, ...referrals };",
+  "const api = { ...core, ...extras, ...engagement, ...library, ...aiFeatures, ...social, ...identity, ...community, ...content, ...platform, ...billing, ...siteReports, ...platformAnalytics, ...profileStories, ...mediaV10, ...socialEventsV10, ...operationsV10, ...searchV10, ...watch, ...referrals, ...money, ...ageVerification, ...livekit, ...gifs, ...story };",
   "type Out<K extends keyof typeof api> = (typeof api)[K] extends (...args: never[]) => infer R ? Awaited<R> : never;",
   // The phone bridge sends ordinary JSON, whereas the web serializer preserves Date instances.
   "type Wire<T> = T extends Date ? string : T extends readonly (infer U)[] ? Wire<U>[] : T extends object ? { [K in keyof T]: Wire<T[K]> } : T;",
