@@ -202,6 +202,20 @@ async function assertAccountAllowed(sql: Sql, userId: string) {
   }
 }
 
+/**
+ * Checks that someone else's account is usable (not banned or suspended) without telling the viewer why. Use this for
+ * other people; `assertAccountAllowed` is for the signed-in person (it explains their own suspension).
+ */
+async function assertPersonAvailable(sql: Sql, userId: string) {
+  try {
+    await assertAccountAllowed(sql, userId);
+  } catch {
+    const error = new Error("This account isn't available.");
+    Object.assign(error, { status: 404 });
+    throw error;
+  }
+}
+
 async function assertCommunityReadable(sql: Sql, userId: string | null, communityId: string) {
   if (userId) await assertAccountAllowed(sql, userId);
   const community = await requireCommunity(sql, communityId);
@@ -211,7 +225,7 @@ async function assertCommunityReadable(sql: Sql, userId: string | null, communit
 }
 
 async function assertPeerContactAllowed(sql: Sql, userId: string, targetId: string) {
-  await assertAccountAllowed(sql, targetId);
+  await assertPersonAvailable(sql, targetId);
   const ages = await sql`select user_id, age_eligible_at_18 from profiles where user_id in (${userId}, ${targetId})`;
   if (ages.length !== 2) throw new Error('This conversation is unavailable.');
   const adult = (row: Record<string, unknown>) => Boolean(row.age_eligible_at_18 && new Date(String(row.age_eligible_at_18)).getTime() <= Date.now());
@@ -3170,11 +3184,17 @@ export const getPublicProfile = createServerFn({ method: "GET" })
     )[0];
     if (!row) throw new Error("No one by that name.");
     const isSelf = v.userId === row.user_id;
+    // Banned or suspended accounts aren't shown to others (and the reason is never revealed).
+    if (!isSelf) await assertPersonAvailable(sql, String(row.user_id));
     const profile = scrubProfile(mapProfile(row), isSelf);
     const blocked = v.userId
       ? (
           await sql`select 1 from blocks where blocker_id = ${v.userId} and blocked_id = ${profile.userId}`
         ).length > 0
+      : false;
+    // Someone who blocked the viewer sees only the header too (this used to return their wall, titles and characters).
+    const blockedBy = v.userId && !isSelf
+      ? (await sql`select 1 from blocks where blocker_id = ${profile.userId} and blocked_id = ${v.userId}`).length > 0
       : false;
     // Private accounts: people who do not follow them only see the header (name, picture, counts).
     const followsThem = v.userId
@@ -3183,7 +3203,7 @@ export const getPublicProfile = createServerFn({ method: "GET" })
     const requested = v.userId
       ? (await sql`select 1 from follow_requests where follower_id = ${v.userId} and followee_id = ${profile.userId}`).length > 0
       : false;
-    if (profile.privateAccount && !isSelf && !followsThem) {
+    if (!isSelf && ((profile.privateAccount && !followsThem) || blocked || blockedBy)) {
       const count = async (column: "follower_id" | "followee_id") =>
         Number(
           (
@@ -3311,16 +3331,18 @@ export const getPublicProfile = createServerFn({ method: "GET" })
          from wall_posts w
          left join profiles pr on pr.user_id = w.author_user_id
          where w.profile_user_id = $1 and w.held = false
+           and not exists (select 1 from blocks b where (b.blocker_id = $2 and b.blocked_id = w.author_user_id) or (b.blocker_id = w.author_user_id and b.blocked_id = $2))
+           and not exists (select 1 from muted_people mp where mp.user_id = $2 and mp.muted_user_id = w.author_user_id)
          order by w.id desc
          limit 40`,
-        [profile.userId],
+        [profile.userId, v.userId ?? ""],
       );
       const wallIds = wallRaw.map((r) => Number(r.id));
       const likedWall = new Set<number>();
       if (v.userId && wallIds.length) {
         try {
           const likedRows = await sql<{ wall_post_id: number }>`
-            select wall_post_id from wall_likes where user_id = ${v.userId}
+            select wall_post_id from wall_likes where user_id = ${v.userId} and wall_post_id = any(${wallIds})
           `;
           for (const r of likedRows) {
             const id = Number(r.wall_post_id);
@@ -4395,7 +4417,9 @@ export const hideTitle = createServerFn({ method: "POST" })
 
 export const addWallPost = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { handle: string; body: string }) => d)
+  .validator((d: { handle: string; body: string }) =>
+    z.object({ handle: z.string().trim().min(1).max(40), body: z.string().trim().min(1, "Write something first.").max(500, "Keep wall notes under 500 characters.") }).parse(d),
+  )
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
@@ -4405,11 +4429,18 @@ export const addWallPost = createServerFn({ method: "POST" })
       await sql<{
         user_id: string;
         handle: string;
-      }>`select user_id, handle from profiles where handle = ${data.handle}`
+        private_account: unknown;
+      }>`select user_id, handle, private_account from profiles where handle = ${data.handle.replace(/^@/, "")}`
     )[0];
     if (!profile) throw new Error("No one by that name.");
     if (userId === profile.user_id)
       throw new Error("Use a post in a hall — the wall is for visitors.");
+    await assertPersonAvailable(sql, profile.user_id);
+    // A private account's wall is only for people they accepted (others can't even see it).
+    if (asBool(profile.private_account)) {
+      const follows = await sql`select 1 from profile_follows where follower_id = ${userId} and followee_id = ${profile.user_id}`;
+      if (!follows.length) throw new Error("Only people this account accepted can write on their wall.");
+    }
     const blocked = await sql`
       select 1 from blocks
       where (blocker_id = ${userId} and blocked_id = ${profile.user_id})
@@ -5200,6 +5231,7 @@ export const internals = {
   canReadForViewer,
   assertCommunityReadable,
   assertAccountAllowed,
+  assertPersonAvailable,
   communityMetadataAccessSql,
   assertPeerContactAllowed,
   communityAccessSql,

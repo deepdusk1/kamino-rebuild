@@ -249,3 +249,20 @@ test("trending favours this week's posts and new members", async () => {
   assert.equal(isCreator(false, 1000), true);
   assert.equal(isCreator(true, 0), true);
 });
+
+test("others don't see someone's exact check-in time, onboarding date or notification switches", async () => {
+  const { scrubProfile } = await import("./social-rules.ts");
+  const profile = {
+    quietStart: 22, quietEnd: 7, timezone: "America/Vancouver", notifyPrefs: { social: false, community: true, events: true, messages: true, digest: true },
+    interests: ["anime"], showOnline: false, lastSeenAt: "2026-10-15T17:42:10.000Z", showReadReceipts: false,
+    lastCheckinAt: "2026-10-15T17:42:10.000Z", onboardedAt: "2026-01-01T00:00:00.000Z",
+    notifyLikes: false, notifyComments: false, notifyFollows: false, notifyChat: false, notifyWall: false,
+  };
+  const seen = scrubProfile(profile, false);
+  assert.equal(seen.lastCheckinAt, "2026-10-15T00:00:00.000Z", "only the day remains (enough for the streak)");
+  assert.equal(seen.lastSeenAt, null);
+  assert.equal(seen.onboardedAt, null);
+  assert.deepEqual([seen.notifyLikes, seen.notifyComments, seen.notifyFollows, seen.notifyChat, seen.notifyWall], [true, true, true, true, true]);
+  assert.equal(scrubProfile({ ...profile, lastCheckinAt: null }, false).lastCheckinAt, null);
+  assert.equal(scrubProfile(profile, true).lastCheckinAt, profile.lastCheckinAt, "you still see your own");
+});

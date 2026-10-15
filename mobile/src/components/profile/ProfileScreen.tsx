@@ -198,9 +198,10 @@ export function ProfileScreen({ handle, inTabs }: Props) {
         bioText = fb.text.trim();
       }
       if (!bioText) throw new Error("The AI didn't send a bio back.");
-      const ok = await confirmAction("Use this bio?", bioText, "Use it");
+      const ok = await confirmAction("Use this bio?", bioText.slice(0, 280), "Use it");
       if (ok) {
-        await api.updateSettings({ bio: bioText.slice(0, 500) });
+        // Bios hold 280 characters (the server cuts the rest), so the saved bio is what was shown.
+        await api.updateSettings({ bio: bioText.slice(0, 280) });
         await refresh();
         haptic.success();
       }
@@ -452,12 +453,16 @@ export function ProfileScreen({ handle, inTabs }: Props) {
         },
       ]
     : [
-        {
-          key: "message",
-          label: "Message",
-          icon: "chatbubble-ellipses-outline",
-          onPress: () => void message(),
-        },
+        ...(d.blocked || (d.locked && !p.privateAccount)
+          ? []
+          : [
+              {
+                key: "message",
+                label: "Message",
+                icon: "chatbubble-ellipses-outline" as const,
+                onPress: () => void message(),
+              },
+            ]),
         {
           key: "share",
           label: "Share profile",
@@ -701,6 +706,17 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                   Edit Profile
                 </Txt>
               </PressableScale>
+            ) : d.blocked ? (
+              <PressableScale
+                onPress={() => void toggleBlock()}
+                disabled={busy === "block"}
+                accessibilityLabel={`You blocked ${p.displayName}. Tap to unblock`}
+                scaleTo={0.95}
+                style={{ width: 118, height: 32, borderRadius: radius.pill, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, backgroundColor: theme.tints.red }}
+              >
+                <Ionicons name="ban-outline" size={16} color={theme.danger} />
+                <Txt style={{ fontFamily: font.bold, fontSize: 14, lineHeight: 18, color: theme.danger }}>Unblock</Txt>
+              </PressableScale>
             ) : d.following || d.requested ? (
               <PressableScale
                 onPress={() => void follow()}
@@ -749,7 +765,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
               />
             )}
 
-            {isSelf ? null : (
+            {isSelf || d.blocked || locked ? null : (
               <TipButton
                 recipient={{ userId: p.userId, name: p.displayName }}
                 target={{ type: "profile", id: p.userId }}
@@ -958,7 +974,20 @@ export function ProfileScreen({ handle, inTabs }: Props) {
 
         {locked ? (
           <View style={{ marginTop: 10 }}>
-            <PrivateNotice requested={d.requested} />
+            {d.blocked ? (
+              <EmptyHint
+                emoji="🚫"
+                title={`You blocked @${p.handle}`}
+                text="You won't see their posts and they can't message you. They aren't told."
+                actionLabel="Unblock"
+                onAction={() => void toggleBlock()}
+                style={{ marginHorizontal: 10 }}
+              />
+            ) : p.privateAccount ? (
+              <PrivateNotice requested={d.requested} />
+            ) : (
+              <EmptyHint emoji="🔒" title="This profile isn't available" text="You can't see this person's posts or details." style={{ marginHorizontal: 10 }} />
+            )}
           </View>
         ) : (
           <View style={{ gap: 12, marginTop: 6 }}>
@@ -1179,6 +1208,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
             {old ? (
               <OlderProfileParts
                 old={old}
+                viewerId={viewerId}
                 wall={wall}
                 setWall={setWall}
                 posting={busy === "wall"}
@@ -1242,6 +1272,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
 
 function OlderProfileParts({
   old,
+  viewerId,
   wall,
   setWall,
   posting,
@@ -1249,6 +1280,7 @@ function OlderProfileParts({
   refresh,
 }: {
   old: PublicProfile;
+  viewerId?: string;
   wall: string;
   setWall: (v: string) => void;
   posting: boolean;
@@ -1263,11 +1295,10 @@ function OlderProfileParts({
         notify("Couldn't do that", errorMessage(e)),
       );
   const remove = (id: number) =>
-    void api
-      .deleteWallPost(id)
-      .then(refresh, (e: unknown) =>
-        notify("Couldn't do that", errorMessage(e)),
-      );
+    void confirmAction("Delete this wall note?", "This can't be undone.", "Delete", true).then((ok) => {
+      if (!ok) return;
+      return api.deleteWallPost(id).then(refresh, (e: unknown) => notify("Couldn't do that", errorMessage(e)));
+    });
   const card = [
     {
       backgroundColor: theme.surface,
@@ -1339,7 +1370,7 @@ function OlderProfileParts({
       ) : null}
 
       <ProfileSection title="Wall" emoji="💬">
-        {old.blocked ? null : (
+        {old.blocked || old.isSelf ? null : (
           <View style={{ gap: 8 }}>
             <Field
               value={wall}
@@ -1372,7 +1403,7 @@ function OlderProfileParts({
               color: theme.muted,
             }}
           >
-            No wall notes yet. Be the first to say hi!
+            {old.isSelf ? "No wall notes yet. Visitors can leave you notes here." : "No wall notes yet. Be the first to say hi!"}
           </Txt>
         ) : null}
         {old.wall.map((w) => (
@@ -1421,7 +1452,7 @@ function OlderProfileParts({
                 onPress={() => like(w.id)}
                 size={18}
               />
-              {old.isSelf ? (
+              {old.isSelf || w.author.userId === viewerId ? (
                 <PressableScale
                   onPress={() => remove(w.id)}
                   accessibilityLabel="Delete this wall note"

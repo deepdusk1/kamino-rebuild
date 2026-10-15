@@ -80,8 +80,14 @@ export async function pickAvatar(source: "library" | "camera" = "library"): Prom
   const asset = result.assets?.[0];
   if (result.canceled || !asset) return null;
 
+  // Cut the middle square first: where the picker can't crop (Android without cropping, the web), resizing a
+  // rectangle straight to 320×320 squashed the face.
+  const side = Math.min(asset.width, asset.height);
+  const square = side > 0 && asset.width !== asset.height ? { originX: Math.floor((asset.width - side) / 2), originY: Math.floor((asset.height - side) / 2), width: side, height: side } : null;
   for (const quality of [0.85, 0.7, 0.55, 0.4]) {
-    const image = await ImageManipulator.manipulate(asset.uri).resize({ width: 320, height: 320 }).renderAsync();
+    const context = ImageManipulator.manipulate(asset.uri);
+    if (square) context.crop(square);
+    const image = await context.resize({ width: 320, height: 320 }).renderAsync();
     const saved = await image.saveAsync({ format: SaveFormat.JPEG, compress: quality, base64: true });
     if (saved.base64 && base64Bytes(saved.base64) <= AVATAR_BYTES) return `data:image/jpeg;base64,${saved.base64}`;
   }

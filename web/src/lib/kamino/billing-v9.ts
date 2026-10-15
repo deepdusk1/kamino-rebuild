@@ -154,7 +154,7 @@ export const createStripeCheckout = createServerFn({ method: "POST" })
         );
     }
     if (offer.owner_id === userId) throw new Error("You cannot purchase your own offer.");
-    await internals.assertAccountAllowed(sql, String(offer.owner_id));
+    await internals.assertPersonAvailable(sql, String(offer.owner_id));
     if (
       (
         await sql`select 1 from blocks where (blocker_id=${userId} and blocked_id=${String(offer.owner_id)}) or (blocker_id=${String(offer.owner_id)} and blocked_id=${userId})`
@@ -180,7 +180,7 @@ export const createStripeCheckout = createServerFn({ method: "POST" })
         throw new Error("Choose another eligible gift recipient.");
       beneficiary = String(recipient.user_id);
       await internals.assertPeerContactAllowed(sql, userId, beneficiary);
-      await internals.assertAccountAllowed(sql, beneficiary);
+      await internals.assertPersonAvailable(sql, beneficiary);
       await internals.requireMinAge(sql, beneficiary);
       if (
         offer.community_id &&

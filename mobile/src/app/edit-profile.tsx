@@ -6,7 +6,7 @@ import { Pressable, View } from "react-native";
 import { api } from "@/api/endpoints";
 import { BUBBLE_STYLES, INTEREST_OPTIONS, MOOD_PRESETS, PROFILE_CATEGORY_OPTIONS, PROFILE_FRAME_IDS, type BubbleStyle, type Profile, type ProfileFrame } from "@/api/types";
 import { serverImage } from "@/components/community/media";
-import { notify } from "@/components/community/platform";
+import { confirmAction, notify } from "@/components/community/platform";
 import { GradientButton, Picture } from "@/components/k";
 import { toggleLimited, normalizeWebsite } from "@/components/profile/helpers";
 import { Avatar, ErrorState, Field, Loading, PressableScale, Screen, Txt } from "@/components/ui";
@@ -29,7 +29,13 @@ export default function EditProfile() {
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   if (me.isPending) return <Loading />;
   if (me.isError || !me.data) return <ErrorState error={me.error} onRetry={() => void me.refetch()} />;
-  return <Form profile={me.data.profile} onSaved={() => queryClient.invalidateQueries().then(() => router.back())} />;
+  // Opened from a link there may be nothing to go back to, so fall back to your profile tab.
+  return (
+    <Form
+      profile={me.data.profile}
+      onSaved={() => queryClient.invalidateQueries().then(() => (router.canGoBack() ? router.back() : router.replace("/me" as never)))}
+    />
+  );
 }
 
 /**
@@ -57,6 +63,21 @@ function Form({ profile, onSaved }: { profile: Profile; onSaved: () => Promise<u
   const [error, setError] = useState<string | null>(null);
 
   const websiteValue = normalizeWebsite(website);
+  // Anything typed but not saved yet (photos save straight away, so they don't count).
+  const dirty =
+    displayName !== profile.displayName ||
+    headline !== (profile.headline ?? "") ||
+    pronouns !== (profile.pronouns ?? "") ||
+    bio !== profile.bio ||
+    status !== profile.status ||
+    location !== (profile.location ?? "") ||
+    website !== (profile.website ?? "") ||
+    mood !== profile.mood ||
+    frame !== profile.frame ||
+    bubbleHue !== profile.bubbleHue ||
+    bubbleStyle !== profile.bubbleStyle ||
+    categories.join() !== (profile.profileCategories ?? []).join() ||
+    interests.join() !== (profile.interests ?? []).join();
 
   /** Photos are saved straight away (not with the Save button) so they never get lost. */
   const media = async (key: string, work: () => Promise<unknown>) => {
@@ -72,9 +93,15 @@ function Form({ profile, onSaved }: { profile: Profile; onSaved: () => Promise<u
   };
   const changePhoto = () => media("photo", async () => { const d = await pickAvatar("library"); if (d) await api.setAvatar(d); });
   const animatedPhoto=()=>media('photo',async()=>{const file=await pickContentFile('gif','image/gif',2_000_000);if(file)await api.setAvatar(file.dataUrl);});
-  const removePhoto = () => media("photo", () => api.removeAvatar());
+  const removePhoto = () =>
+    void confirmAction("Remove your photo?", "Your initials show instead until you add a new one.", "Remove", true).then((ok) => {
+      if (ok) void media("photo", () => api.removeAvatar());
+    });
   const changeCover = () => media("cover", async () => { const d = await pickPhoto("library", 1_400_000); if (d) await api.setProfileCover(d); });
-  const removeCover = () => media("cover", () => api.removeProfileCover());
+  const removeCover = () =>
+    void confirmAction("Remove your cover?", "Your profile shows a colour gradient instead.", "Remove", true).then((ok) => {
+      if (ok) void media("cover", () => api.removeProfileCover());
+    });
 
   const save = async () => {
     setError(null);
@@ -201,7 +228,10 @@ function Form({ profile, onSaved }: { profile: Profile; onSaved: () => Promise<u
           <Txt style={{ flex: 1, fontFamily: font.semibold, fontSize: 13, lineHeight: 18, color: theme.danger }}>{error}</Txt>
         </View>
       ) : null}
-      <GradientButton label="Save" icon="checkmark" size="lg" gradient="hero" full onPress={() => void save()} busy={busy === "save"} />
+      {dirty ? (
+        <Txt style={{ fontFamily: font.semibold, fontSize: 12.5, lineHeight: 17, color: theme.muted, textAlign: "center" }}>You have unsaved changes. Tap Save to keep them.</Txt>
+      ) : null}
+      <GradientButton label="Save" icon="checkmark" size="lg" gradient="hero" full onPress={() => void save()} busy={busy === "save"} disabled={!dirty} />
     </Screen>
   );
 }

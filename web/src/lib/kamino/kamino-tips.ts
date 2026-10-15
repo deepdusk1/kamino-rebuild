@@ -143,7 +143,7 @@ export const startKaminoTip = createServerFn({ method: "POST" })
       targetId = data.recipientUserId;
     }
     // Tips only go to adult members in good standing.
-    await internals.assertAccountAllowed(sql, data.recipientUserId);
+    await internals.assertPersonAvailable(sql, data.recipientUserId);
     await internals.requireMinAge(sql, data.recipientUserId).catch(() => {
       throw new Error("This person can't receive tips.");
     });

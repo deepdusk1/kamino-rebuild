@@ -267,7 +267,8 @@ export const api = {
   profileOverview: (handle: string) => rpc<M.ProfileOverview>("profileOverview", { handle }),
   /** A person's posts, optionally only one tag (the profile category tiles). */
   profilePosts: (handle: string, tag?: string, cursor?: string | null) => rpc<M.ProfilePostsPage>("profilePosts", { handle, tag, cursor }),
-  followLists: (handle: string, kind: "followers" | "following" | "friends") => rpc<M.FollowList>("followLists", { handle, kind }),
+  followLists: (handle: string, kind: "followers" | "following" | "friends", cursor?: string | null) =>
+    rpc<M.FollowList>("followLists", { handle, kind, cursor: cursor ?? null }),
   followRequests: () => rpc<M.FollowRequestRow[]>("followRequests"),
   answerFollowRequest: (userId: string, accept: boolean) => rpc<{ ok: boolean; accepted: boolean }>("answerFollowRequest", { userId, accept }),
   /**
