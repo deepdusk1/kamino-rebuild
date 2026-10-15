@@ -62,6 +62,8 @@ import { Route as GroupsRoomIdRouteImport } from './routes/groups/$roomId'
 import { Route as InviteCodeRouteImport } from './routes/invite/$code'
 import { Route as UHandleRouteImport } from './routes/u/$handle'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiSolanaPayLinkRouteImport } from './routes/api/solana-pay/link'
+import { Route as ApiSolanaPayTipRouteImport } from './routes/api/solana-pay/tip'
 import { Route as ApiV1JobsRouteImport } from './routes/api/v1/jobs'
 import { Route as CSlugIndexRouteImport } from './routes/c/$slug/index'
 import { Route as CSlugChatsRouteImport } from './routes/c/$slug/chats'
@@ -354,6 +356,16 @@ const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   path: '/api/auth/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiSolanaPayLinkRoute = ApiSolanaPayLinkRouteImport.update({
+  id: '/api/solana-pay/link',
+  path: '/api/solana-pay/link',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSolanaPayTipRoute = ApiSolanaPayTipRouteImport.update({
+  id: '/api/solana-pay/tip',
+  path: '/api/solana-pay/tip',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiV1JobsRoute = ApiV1JobsRouteImport.update({
   id: '/api/v1/jobs',
   path: '/api/v1/jobs',
@@ -546,6 +558,8 @@ export interface FileRoutesByFullPath {
   '/u/$handle': typeof UHandleRoute
   '/chats/': typeof ChatsIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/solana-pay/link': typeof ApiSolanaPayLinkRoute
+  '/api/solana-pay/tip': typeof ApiSolanaPayTipRoute
   '/api/v1/jobs': typeof ApiV1JobsRoute
   '/c/$slug/chats': typeof CSlugChatsRoute
   '/c/$slug/events': typeof CSlugEventsRoute
@@ -625,6 +639,8 @@ export interface FileRoutesByTo {
   '/u/$handle': typeof UHandleRoute
   '/chats': typeof ChatsIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/solana-pay/link': typeof ApiSolanaPayLinkRoute
+  '/api/solana-pay/tip': typeof ApiSolanaPayTipRoute
   '/api/v1/jobs': typeof ApiV1JobsRoute
   '/c/$slug/chats': typeof CSlugChatsRoute
   '/c/$slug/events': typeof CSlugEventsRoute
@@ -707,6 +723,8 @@ export interface FileRoutesById {
   '/u/$handle': typeof UHandleRoute
   '/chats/': typeof ChatsIndexRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/solana-pay/link': typeof ApiSolanaPayLinkRoute
+  '/api/solana-pay/tip': typeof ApiSolanaPayTipRoute
   '/api/v1/jobs': typeof ApiV1JobsRoute
   '/c/$slug/chats': typeof CSlugChatsRoute
   '/c/$slug/events': typeof CSlugEventsRoute
@@ -790,6 +808,8 @@ export interface FileRouteTypes {
     | '/u/$handle'
     | '/chats/'
     | '/api/auth/$'
+    | '/api/solana-pay/link'
+    | '/api/solana-pay/tip'
     | '/api/v1/jobs'
     | '/c/$slug/chats'
     | '/c/$slug/events'
@@ -869,6 +889,8 @@ export interface FileRouteTypes {
     | '/u/$handle'
     | '/chats'
     | '/api/auth/$'
+    | '/api/solana-pay/link'
+    | '/api/solana-pay/tip'
     | '/api/v1/jobs'
     | '/c/$slug/chats'
     | '/c/$slug/events'
@@ -950,6 +972,8 @@ export interface FileRouteTypes {
     | '/u/$handle'
     | '/chats/'
     | '/api/auth/$'
+    | '/api/solana-pay/link'
+    | '/api/solana-pay/tip'
     | '/api/v1/jobs'
     | '/c/$slug/chats'
     | '/c/$slug/events'
@@ -1027,6 +1051,8 @@ export interface RootRouteChildren {
   InviteCodeRoute: typeof InviteCodeRoute
   UHandleRoute: typeof UHandleRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiSolanaPayLinkRoute: typeof ApiSolanaPayLinkRoute
+  ApiSolanaPayTipRoute: typeof ApiSolanaPayTipRoute
   ApiV1JobsRoute: typeof ApiV1JobsRoute
   ApiV1AuthMobileCallbackRoute: typeof ApiV1AuthMobileCallbackRoute
   ApiV1AuthMobileStartRoute: typeof ApiV1AuthMobileStartRoute
@@ -1416,6 +1442,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAuthSplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/solana-pay/link': {
+      id: '/api/solana-pay/link'
+      path: '/api/solana-pay/link'
+      fullPath: '/api/solana-pay/link'
+      preLoaderRoute: typeof ApiSolanaPayLinkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/solana-pay/tip': {
+      id: '/api/solana-pay/tip'
+      path: '/api/solana-pay/tip'
+      fullPath: '/api/solana-pay/tip'
+      preLoaderRoute: typeof ApiSolanaPayTipRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/v1/jobs': {
       id: '/api/v1/jobs'
       path: '/api/v1/jobs'
@@ -1708,6 +1748,8 @@ const rootRouteChildren: RootRouteChildren = {
   InviteCodeRoute: InviteCodeRoute,
   UHandleRoute: UHandleRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiSolanaPayLinkRoute: ApiSolanaPayLinkRoute,
+  ApiSolanaPayTipRoute: ApiSolanaPayTipRoute,
   ApiV1JobsRoute: ApiV1JobsRoute,
   ApiV1AuthMobileCallbackRoute: ApiV1AuthMobileCallbackRoute,
   ApiV1AuthMobileStartRoute: ApiV1AuthMobileStartRoute,

@@ -5,7 +5,7 @@
  * Everything here also works without AI keys: the safety queue then only shows what the built-in rules found, and
  * role-play scenes can still be played by members, just without the AI storyteller.
  */
-import { createServerFn } from "@tanstack/react-start";
+import { createServerFn, createServerOnlyFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import type { Sql } from "@/lib/db";
 import { AiUnavailableError, aiConfig, budgetLeft, chatComplete } from "./ai.server";
@@ -218,7 +218,7 @@ type SceneRow = {
   held: boolean;
 };
 
-export async function loadScene(sql: Sql, sceneId: number) {
+async function loadScene(sql: Sql, sceneId: number) {
   const row = (await sql<SceneRow>`select * from roleplay_scenes where id = ${sceneId}`)[0];
   if (!row) throw new Error("Story not found.");
   row.held = asBool(row.held);
@@ -234,7 +234,7 @@ export async function loadScene(sql: Sql, sceneId: number) {
 }
 
 /** The viewer may read the scene's community. Returns the viewer's membership. */
-export async function requireSceneRead(sql: Sql, userId: string | null, communityId: string) {
+async function requireSceneRead(sql: Sql, userId: string | null, communityId: string) {
   const community = await requireCommunity(sql, communityId);
   const m = await membershipOf(sql, userId, communityId);
   if (!canRead(community, m)) throw new Error("This community is private.");
@@ -242,14 +242,14 @@ export async function requireSceneRead(sql: Sql, userId: string | null, communit
 }
 
 /** The viewer may write in the scene: an active member who is not muted and passed the age check. */
-export async function requireScenePlay(sql: Sql, userId: string, communityId: string) {
+async function requireScenePlay(sql: Sql, userId: string, communityId: string) {
   await requireMinAge(sql, userId);
   const m = await requireActiveMember(sql, userId, communityId);
   await assertNotMuted(sql, userId, communityId);
   return m;
 }
 
-export async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnForPrompt[]> {
+async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnForPrompt[]> {
   const rows = await sql<{ kind: string; character_name: string; body: string }>`
     select kind, character_name, body from roleplay_turns where scene_id = ${sceneId} and held = false and rewound_at is null order by id desc limit 60
   `;
@@ -263,7 +263,7 @@ export async function turnsForPrompt(sql: Sql, sceneId: number): Promise<TurnFor
 }
 
 /** Asks the storyteller for narration or an ending, saves it (after the safety check) and returns the new turn's id. */
-export async function storytellerWrites(
+async function storytellerWrites(
   sql: Sql,
   scene: Awaited<ReturnType<typeof loadScene>>,
   kind: "narration" | "ending",
@@ -311,7 +311,7 @@ export async function storytellerWrites(
 }
 
 /** Runs the storyteller but never lets its failure undo what the member did; returns a message to show instead. */
-export async function tryStoryteller(run: () => Promise<unknown>): Promise<string | null> {
+async function tryStoryteller(run: () => Promise<unknown>): Promise<string | null> {
   try {
     await run();
     return null;
@@ -728,3 +728,16 @@ export const deleteScene = createServerFn({ method: "POST" })
     await sql`delete from roleplay_scenes where id = ${data.sceneId}`;
     return { ok: true };
   });
+
+/**
+ * The role-play helpers story.ts (branch voting and rewinds) shares, on the server only. They are not exported one
+ * by one: that would keep the AI service (ai.server) in the website's browser bundle, which the build refuses.
+ */
+export const storyHelpers = createServerOnlyFn(() => ({
+  loadScene,
+  requireSceneRead,
+  requireScenePlay,
+  storytellerWrites,
+  tryStoryteller,
+  turnsForPrompt,
+}));

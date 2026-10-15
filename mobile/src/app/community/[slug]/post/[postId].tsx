@@ -29,6 +29,7 @@ import { haptic } from "@/lib/haptics";
 import { HELD_MESSAGE, HELD_TITLE } from "@/lib/held";
 import { STICKER_PACKS } from "@/lib/stickers";
 import { usePostActions } from "@/lib/usePostActions";
+import { TipButton } from "@/components/kamino/TipButton";
 import { font, radius, useTheme } from "@/theme";
 import { PostContentTools } from "@/components/content/PostContentTools";
 import { contentApi } from "@/lib/content-v9";
@@ -331,6 +332,13 @@ function PostScreen() {
                 <Ionicons name="arrow-redo-outline" size={22} color={theme.text} />
                 <Txt style={{ fontFamily: font.semibold, fontSize: 15, color: theme.text }}>Share</Txt>
               </PressableScale>
+              {isAuthor ? null : (
+                <TipButton
+                  variant="inline"
+                  recipient={{ userId: post.author.userId, name: post.author.nickname }}
+                  target={{ type: "post", id: String(id) }}
+                />
+              )}
               <View style={{ flex: 1 }} />
               <PressableScale
                 onPress={() => void actions.toggleSave()}

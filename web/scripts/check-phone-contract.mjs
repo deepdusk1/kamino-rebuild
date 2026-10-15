@@ -39,6 +39,7 @@ const wrapperPaths = [
   ["searchV10", "../mobile/src/api/search-v10.ts"],
   ["operationsV10", "../mobile/src/api/operations-v10.ts"],
   ["referrals", "../mobile/src/api/referrals.ts"],
+  ["kamino", "../mobile/src/api/kamino.ts"],
 ];
 const checked = [], allCalls = [];
 const imports = [];
@@ -132,8 +133,9 @@ const lines = [
   'import * as livekit from "../src/lib/kamino/livekit";',
   'import * as gifs from "../src/lib/kamino/gifs";',
   'import * as story from "../src/lib/kamino/story";',
+  'import * as kaminoTips from "../src/lib/kamino/kamino-tips";',
   ...imports,
-  "const api = { ...core, ...extras, ...engagement, ...library, ...aiFeatures, ...social, ...identity, ...community, ...content, ...platform, ...billing, ...siteReports, ...platformAnalytics, ...profileStories, ...mediaV10, ...socialEventsV10, ...operationsV10, ...searchV10, ...watch, ...referrals, ...money, ...ageVerification, ...livekit, ...gifs, ...story };",
+  "const api = { ...core, ...extras, ...engagement, ...library, ...aiFeatures, ...social, ...identity, ...community, ...content, ...platform, ...billing, ...siteReports, ...platformAnalytics, ...profileStories, ...mediaV10, ...socialEventsV10, ...operationsV10, ...searchV10, ...watch, ...referrals, ...money, ...ageVerification, ...livekit, ...gifs, ...story, ...kaminoTips };",
   "type Out<K extends keyof typeof api> = (typeof api)[K] extends (...args: never[]) => infer R ? Awaited<R> : never;",
   // The phone bridge sends ordinary JSON, whereas the web serializer preserves Date instances.
   "type Wire<T> = T extends Date ? string : T extends readonly (infer U)[] ? Wire<U>[] : T extends object ? { [K in keyof T]: Wire<T[K]> } : T;",
