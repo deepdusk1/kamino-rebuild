@@ -1,37 +1,32 @@
 import NetInfo from "@react-native-community/netinfo";
-import { readSecret, writeSecret, deleteSecret } from "@/auth/storage";
+import { deleteAsync, documentDirectory, readAsStringAsync, writeAsStringAsync } from "expo-file-system/legacy";
+import { deleteSecret, readSecret } from "@/auth/storage";
+import { applyFlush, entriesForRoom, flushEntries, type QueuedMessage } from "./queue-core";
+
+export type { QueuedMessage } from "./queue-core";
 
 /**
- * Offline message queue: when a chat message cannot reach the server, it waits here and is
- * replayed automatically on reconnect.
+ * Offline message queue: when a chat message can't reach the server, it waits here and is sent automatically when
+ * the phone is back online. The rules (ordering, which failures are retried) are in ./queue-core.ts.
  *
- * Safety properties (fixed Oct 2026 after QA audit):
- * - C2: every queued message is tagged with the owner's user ID; the queue key is
- *   scoped per account; flush verifies the current user matches before sending;
- *   sign-out clears the in-memory wiring so another account never replays yours.
- * - M1: a flush lock serializes concurrent flushes; only acknowledged IDs are
- *   removed, so messages enqueued mid-flush survive.
- * - M2: callers decide what to queue (network errors only); the clientTag is
- *   allocated before the first attempt so server dedup works on every retry.
+ * - Each account has its own queue file, and a flush only ever sends the signed-in account's messages.
+ * - Every message keeps the tag it got before its first attempt, so the server never saves it twice.
+ * - One flush runs at a time; only messages the server confirmed are removed.
+ * - Messages the server refuses for good are kept as "failed" so the chat can show them (retry or delete).
+ *
+ * Stored as a file in the app's private documents folder. (It used to be in SecureStore, which on Android is only
+ * meant for values under 2 KB: a few queued messages were enough to lose the whole queue.)
  */
-const QUEUE_KEY_PREFIX = "kamino.offline-queue.";
+const LEGACY_KEY_PREFIX = "kamino.offline-queue.";
 const MAX_QUEUE = 100;
-
-export type QueuedMessage = {
-  clientTag: string;
-  userId: string;
-  input: { roomId: number; body: string; replyTo?: number | null; clientTag: string };
-  queuedAt: number;
-};
-
-type Queue = QueuedMessage[];
 
 let listeners: ((count: number) => void)[] = [];
 
-function emit(count: number) {
-  for (const listener of listeners) listener(count);
+function emit(queue: QueuedMessage[]) {
+  for (const listener of listeners) listener(queue.length);
 }
 
+/** Called whenever the queue changes (a message added, sent, failed or removed). */
 export function onQueueChange(listener: (count: number) => void): () => void {
   listeners.push(listener);
   return () => {
@@ -39,22 +34,44 @@ export function onQueueChange(listener: (count: number) => void): () => void {
   };
 }
 
-function queueKey(userId: string): string {
-  return `${QUEUE_KEY_PREFIX}${userId}`;
+function fileFor(userId: string): string | null {
+  if (!documentDirectory) return null;
+  return `${documentDirectory}kamino-offline-queue-${userId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`;
 }
 
-async function load(userId: string): Promise<Queue> {
+async function load(userId: string): Promise<QueuedMessage[]> {
+  const file = fileFor(userId);
   try {
-    const raw = await readSecret(queueKey(userId));
-    return raw ? (JSON.parse(raw) as Queue) : [];
+    if (file) {
+      const raw = await readAsStringAsync(file).catch(() => null);
+      if (raw) return JSON.parse(raw) as QueuedMessage[];
+    }
+    // One-time move from the old SecureStore location.
+    const legacy = await readSecret(`${LEGACY_KEY_PREFIX}${userId}`);
+    if (legacy) {
+      const queue = JSON.parse(legacy) as QueuedMessage[];
+      await save(userId, queue, false);
+      await deleteSecret(`${LEGACY_KEY_PREFIX}${userId}`);
+      return queue;
+    }
   } catch {
-    return [];
+    // An unreadable file is treated as empty rather than blocking chat.
   }
+  return [];
 }
 
-async function save(userId: string, queue: Queue): Promise<void> {
-  await writeSecret(queueKey(userId), JSON.stringify(queue.slice(-MAX_QUEUE)));
-  emit(queue.length);
+async function save(userId: string, queue: QueuedMessage[], notify = true): Promise<void> {
+  const kept = queue.slice(-MAX_QUEUE);
+  const file = fileFor(userId);
+  if (file) {
+    try {
+      if (kept.length) await writeAsStringAsync(file, JSON.stringify(kept));
+      else await deleteAsync(file, { idempotent: true });
+    } catch {
+      // Storage full or unavailable: the message stays in this session only.
+    }
+  }
+  if (notify) emit(kept);
 }
 
 /** Allocate a stable client tag before the first send attempt. Reuse it on every retry. */
@@ -63,7 +80,12 @@ export function newClientTag(): string {
 }
 
 export async function queuedCount(userId: string): Promise<number> {
-  return (await load(userId)).length;
+  return (await load(userId)).filter((e) => !e.failed).length;
+}
+
+/** This room's messages that are waiting to send or failed, oldest first (shown at the end of the chat). */
+export async function queuedForRoom(userId: string, roomId: number): Promise<QueuedMessage[]> {
+  return entriesForRoom(await load(userId), userId, roomId);
 }
 
 export async function enqueueMessage(
@@ -78,54 +100,47 @@ export async function enqueueMessage(
     input: { roomId: input.roomId, body: input.body, replyTo: input.replyTo ?? null, clientTag },
     queuedAt: Date.now(),
   };
-  await save(userId, [...queue, entry]);
+  await save(userId, [...queue.filter((e) => e.clientTag !== clientTag), entry]);
   return entry;
 }
 
-/** Remove a user's queued messages (e.g. on sign-out or account deletion). */
+/** Puts a failed message back in line to be sent again (same tag, so it can never be saved twice). */
+export async function retryQueued(userId: string, clientTag: string): Promise<void> {
+  const queue = await load(userId);
+  await save(
+    userId,
+    queue.map((e) => (e.clientTag === clientTag ? { ...e, failed: undefined } : e)),
+  );
+}
+
+/** Removes one waiting or failed message. */
+export async function discardQueued(userId: string, clientTag: string): Promise<void> {
+  const queue = await load(userId);
+  await save(userId, queue.filter((e) => e.clientTag !== clientTag));
+}
+
+/** Remove a user's queued messages (sign-out, account deletion). */
 export async function clearQueue(userId: string): Promise<void> {
-  await deleteSecret(queueKey(userId));
-  emit(0);
+  await save(userId, []);
+  await deleteSecret(`${LEGACY_KEY_PREFIX}${userId}`);
 }
 
 export type SendFn = (input: QueuedMessage["input"]) => Promise<unknown>;
 
-/** One flush at a time; concurrent triggers queue behind the active one. */
+/** One flush at a time; concurrent triggers wait for the active one. */
 let flushInFlight: Promise<{ sent: number; remaining: number }> | null = null;
 
-/**
- * Replays queued messages in order for the given user. Only removes entries the
- * server confirms; anything enqueued during the flush stays queued. Verifies the
- * entry owner matches so one account never sends another's queue (C2).
- */
-export async function flushQueue(
-  userId: string,
-  send: SendFn,
-): Promise<{ sent: number; remaining: number }> {
+/** Sends this user's waiting messages in order (see flushEntries for the rules). */
+export async function flushQueue(userId: string, send: SendFn): Promise<{ sent: number; remaining: number }> {
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
     const queue = await load(userId);
-    if (!queue.length) return { sent: 0, remaining: 0 };
-    const sentIds = new Set<string>();
-    let sent = 0;
-    for (const entry of queue) {
-      // Defensive: never send another account's message with these credentials.
-      if (entry.userId !== userId) continue;
-      try {
-        await send(entry.input);
-        sentIds.add(entry.clientTag);
-        sent += 1;
-      } catch {
-        // Keep for the next flush; do not retry permanently-rejected sends here —
-        // the caller decides what to queue (M2).
-      }
-    }
-    // Remove only acknowledged IDs from the LATEST queue, preserving anything
-    // enqueued while this flush was in flight (M1).
-    const latest = await load(userId);
-    const remaining = latest.filter((e) => !sentIds.has(e.clientTag));
-    await save(userId, remaining);
-    return { sent, remaining: remaining.length };
+    if (!queue.some((e) => !e.failed)) return { sent: 0, remaining: queue.length };
+    const result = await flushEntries(queue, userId, send);
+    // Applied to the LATEST queue, so messages added during the flush are kept.
+    const next = applyFlush(await load(userId), result);
+    await save(userId, next);
+    return { sent: result.sent.size, remaining: next.length };
   })();
   try {
     return await flushInFlight;
@@ -135,27 +150,35 @@ export async function flushQueue(
 }
 
 let wiredUserId: string | null = null;
+let wiredSend: SendFn | null = null;
 let unwireNetInfo: (() => void) | null = null;
 
 /**
- * Hooks the queue to connectivity for one account. Call on sign-in; call
- * `unwireOfflineFlush()` on sign-out so a later account never replays this queue.
+ * Hooks the queue to connectivity for one account. Call on sign-in; call `unwireOfflineFlush()` on sign-out so a
+ * later account never replays this queue.
  */
 export function wireOfflineFlush(userId: string, send: SendFn): void {
   unwireOfflineFlush();
   wiredUserId = userId;
+  wiredSend = send;
   unwireNetInfo = NetInfo.addEventListener((state) => {
     if (state.isConnected && state.isInternetReachable !== false && wiredUserId === userId) {
       void flushQueue(userId, send);
     }
   });
-  // Flush immediately in case we regained connectivity while the app was open.
+  // Flush now in case we came back online while the app was closed.
   void flushQueue(userId, send);
+}
+
+/** Tries to send waiting messages right away (e.g. after the person taps "Try again"). */
+export function flushNow(): void {
+  if (wiredUserId && wiredSend) void flushQueue(wiredUserId, wiredSend);
 }
 
 /** Detach the connectivity listener (call on sign-out). */
 export function unwireOfflineFlush(): void {
   wiredUserId = null;
+  wiredSend = null;
   unwireNetInfo?.();
   unwireNetInfo = null;
 }

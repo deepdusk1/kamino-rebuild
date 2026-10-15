@@ -1294,6 +1294,9 @@ export const roomReceipts = createServerFn({ method: "GET" })
       select cm.user_id, cm.last_read_id, p.display_name, p.handle, p.avatar_hue, p.avatar_version
       from chat_members cm join profiles p on p.user_id = cm.user_id
       where cm.room_id = ${data.roomId} and cm.user_id <> ${userId} and cm.last_read_id > 0 and p.show_read_receipts = true
+        -- Someone who hasn't accepted your message request yet never shows as "Seen".
+        and not exists (select 1 from message_requests mr
+          where mr.room_id = cm.room_id and mr.user_id = cm.user_id and mr.status <> 'accepted')
       order by cm.last_read_id desc limit 50`;
     return {
       seenBy: rows

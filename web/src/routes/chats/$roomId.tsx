@@ -297,7 +297,8 @@ function Room({ roomId, userId, userName }: { roomId: number; userId: string; us
         return;
       }
       stream.current = acquired;
-      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"].find((type) =>
+      // MP4/AAC first: iPhones can't play WebM/Opus voice notes, while every phone and browser plays AAC.
+      const mime = ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"].find((type) =>
         MediaRecorder.isTypeSupported(type),
       );
       const instance = new MediaRecorder(acquired, mime ? { mimeType: mime } : undefined);
