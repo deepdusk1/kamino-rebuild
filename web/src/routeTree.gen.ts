@@ -53,6 +53,7 @@ import { Route as AdminOperationsRouteImport } from './routes/admin.operations'
 import { Route as AdminReportsRouteImport } from './routes/admin/reports'
 import { Route as AdminSafetyRouteImport } from './routes/admin/safety'
 import { Route as ApiEventsRouteImport } from './routes/api/events'
+import { Route as ApiLivekitWebhookRouteImport } from './routes/api/livekit-webhook'
 import { Route as ApiRtcRouteImport } from './routes/api/rtc'
 import { Route as CSlugRouteImport } from './routes/c/$slug'
 import { Route as ChatsIndexRouteImport } from './routes/chats/index'
@@ -308,6 +309,11 @@ const ApiEventsRoute = ApiEventsRouteImport.update({
   path: '/api/events',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiLivekitWebhookRoute = ApiLivekitWebhookRouteImport.update({
+  id: '/api/livekit-webhook',
+  path: '/api/livekit-webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiRtcRoute = ApiRtcRouteImport.update({
   id: '/api/rtc',
   path: '/api/rtc',
@@ -531,6 +537,7 @@ export interface FileRoutesByFullPath {
   '/admin/reports': typeof AdminReportsRoute
   '/admin/safety': typeof AdminSafetyRoute
   '/api/events': typeof ApiEventsRoute
+  '/api/livekit-webhook': typeof ApiLivekitWebhookRoute
   '/api/rtc': typeof ApiRtcRoute
   '/c/$slug': typeof CSlugRouteWithChildren
   '/chats/$roomId': typeof ChatsRoomIdRoute
@@ -610,6 +617,7 @@ export interface FileRoutesByTo {
   '/admin/reports': typeof AdminReportsRoute
   '/admin/safety': typeof AdminSafetyRoute
   '/api/events': typeof ApiEventsRoute
+  '/api/livekit-webhook': typeof ApiLivekitWebhookRoute
   '/api/rtc': typeof ApiRtcRoute
   '/chats/$roomId': typeof ChatsRoomIdRoute
   '/groups/$roomId': typeof GroupsRoomIdRoute
@@ -690,6 +698,7 @@ export interface FileRoutesById {
   '/admin/reports': typeof AdminReportsRoute
   '/admin/safety': typeof AdminSafetyRoute
   '/api/events': typeof ApiEventsRoute
+  '/api/livekit-webhook': typeof ApiLivekitWebhookRoute
   '/api/rtc': typeof ApiRtcRoute
   '/c/$slug': typeof CSlugRouteWithChildren
   '/chats/$roomId': typeof ChatsRoomIdRoute
@@ -772,6 +781,7 @@ export interface FileRouteTypes {
     | '/admin/reports'
     | '/admin/safety'
     | '/api/events'
+    | '/api/livekit-webhook'
     | '/api/rtc'
     | '/c/$slug'
     | '/chats/$roomId'
@@ -851,6 +861,7 @@ export interface FileRouteTypes {
     | '/admin/reports'
     | '/admin/safety'
     | '/api/events'
+    | '/api/livekit-webhook'
     | '/api/rtc'
     | '/chats/$roomId'
     | '/groups/$roomId'
@@ -930,6 +941,7 @@ export interface FileRouteTypes {
     | '/admin/reports'
     | '/admin/safety'
     | '/api/events'
+    | '/api/livekit-webhook'
     | '/api/rtc'
     | '/c/$slug'
     | '/chats/$roomId'
@@ -1008,6 +1020,7 @@ export interface RootRouteChildren {
   TutorialRoute: typeof TutorialRoute
   WelcomeRoute: typeof WelcomeRoute
   ApiEventsRoute: typeof ApiEventsRoute
+  ApiLivekitWebhookRoute: typeof ApiLivekitWebhookRoute
   ApiRtcRoute: typeof ApiRtcRoute
   CSlugRoute: typeof CSlugRouteWithChildren
   GroupsRoomIdRoute: typeof GroupsRoomIdRoute
@@ -1338,6 +1351,13 @@ declare module '@tanstack/react-router' {
       path: '/api/events'
       fullPath: '/api/events'
       preLoaderRoute: typeof ApiEventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/livekit-webhook': {
+      id: '/api/livekit-webhook'
+      path: '/api/livekit-webhook'
+      fullPath: '/api/livekit-webhook'
+      preLoaderRoute: typeof ApiLivekitWebhookRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/rtc': {
@@ -1681,6 +1701,7 @@ const rootRouteChildren: RootRouteChildren = {
   TutorialRoute: TutorialRoute,
   WelcomeRoute: WelcomeRoute,
   ApiEventsRoute: ApiEventsRoute,
+  ApiLivekitWebhookRoute: ApiLivekitWebhookRoute,
   ApiRtcRoute: ApiRtcRoute,
   CSlugRoute: CSlugRouteWithChildren,
   GroupsRoomIdRoute: GroupsRoomIdRoute,

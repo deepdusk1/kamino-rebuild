@@ -90,14 +90,30 @@ async function touchPeer(sql: Sql, room: string, peer: string, name: string) {
 }
 
 async function prune(sql: Sql) {
-  await Promise.all([
+  const [, gone] = await Promise.all([
     sql.query(`DELETE FROM webrtc_signals WHERE created_at < now() - make_interval(secs => $1)`, [
       SIGNAL_TTL_SECONDS,
     ]),
-    sql.query(`DELETE FROM webrtc_peers WHERE last_seen < now() - make_interval(secs => $1)`, [
-      PEER_TTL_SECONDS,
-    ]),
+    sql.query<{ room: string; peer_id: string }>(
+      `DELETE FROM webrtc_peers WHERE last_seen < now() - make_interval(secs => $1) RETURNING room, peer_id`,
+      [PEER_TTL_SECONDS],
+    ),
   ]);
+  await leaveTimedOutCalls(sql, gone);
+}
+
+/**
+ * A phone that stopped checking in (switched off, lost signal, Kamino killed mid-call) never says it left, so it
+ * is taken out of the call here. Peer ids are the member's id (see `authorize`), so they match chat_members.
+ */
+export async function leaveTimedOutCalls(sql: Sql, gone: { room: string; peer_id: string }[]): Promise<void> {
+  if (!gone.length) return;
+  const { leaveCall } = await import("@/lib/kamino/calls.server");
+  for (const { room, peer_id } of gone) {
+    const match = /^k-live-(\d+)$/.exec(room);
+    if (!match) continue;
+    await leaveCall(sql, Number(match[1]), peer_id, { explicit: false }).catch(() => undefined);
+  }
 }
 
 function json(body: unknown, status = 200): Response {

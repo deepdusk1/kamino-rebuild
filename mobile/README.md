@@ -179,6 +179,10 @@ If you change a data type on the server, run `npm run sync-types` here to copy i
   There is no speaker/earpiece switch (that needs one more native library). Behind strict office or
   mobile networks a TURN relay is needed (`KAMINO_TURN_*` on the server).
 - **AI features** depend on the server's free AI keys. Without them, stories are played and narrated by members and only the built-in safety rules run. The AI will sometimes flag harmless posts or miss bad ones, which is why people make the final decision.
+- **Calls in the background (Android)**: a call shows a "Call in progress" notification so it keeps
+  going when you leave Kamino. Google Play asks about this once: Play Console > App content >
+  Foreground service permissions, choose *Microphone / Camera: voice and video calls* and
+  *Media playback: listening to live audio rooms*, and add a short screen recording of a call.
 - **Push notifications** are wired end-to-end, but were not tested on a physical phone in this
   build environment — do one test on a real device after your first EAS build.
 - **Photos, videos and voice notes** are stored in the server's database unless the server has the

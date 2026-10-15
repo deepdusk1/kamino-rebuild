@@ -4899,7 +4899,11 @@ export const ringCall = createServerFn({ method: "POST" })
   .handler(async ({ context, data: roomId }) => {
     const sql = await db();
     const { userId } = context as Authed;
+    await requireMinAge(sql, userId);
     const room = await requireRoomAccess(sql, userId, roomId);
+    // Ringing is for direct and group chats. A community room could ring hundreds of people at once.
+    if (!["dm", "group"].includes(String(room.kind))) throw new Error("Only direct and group chats can ring.");
+    await guard(userId, "invite");
     const me = (
       await sql<{
         display_name: string;
@@ -4907,7 +4911,7 @@ export const ringCall = createServerFn({ method: "POST" })
     )[0];
     const others = await sql<{
       user_id: string;
-    }>`select user_id from chat_members where room_id = ${roomId} and user_id <> ${userId}`;
+    }>`select user_id from chat_members where room_id = ${roomId} and user_id <> ${userId} and room_removed = false`;
     const label = String(room.name || "call");
     for (const o of others) {
       publishEvent({ type: "call", toUserId: o.user_id, roomId });
@@ -5022,13 +5026,14 @@ export const endCall = createServerFn({ method: "POST" })
     const sql = await db();
     const { userId } = context as Authed;
     await requireRoomAccess(sql, userId, roomId);
-    await sql`
-      update notifications
-      set read = true
-      where kind = 'call' and href = ${`/chats/${roomId}?call=1`}
-    `;
-    return { ok: true };
+    // Takes this person out of the call. A 1:1 call (or a call nobody is left in) ends for everyone: rings stop
+    // and the other person's call screen closes.
+    const { leaveCall } = await loadCalls();
+    const { callOver } = await leaveCall(sql, roomId, userId, { explicit: true });
+    return { ok: true, callOver };
   });
+
+const loadCalls = createServerOnlyFn(() => import("./calls.server"));
 
 export const setWatchMedia = createServerFn({ method: "POST" })
   .middleware([authMiddleware])

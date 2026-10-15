@@ -18,6 +18,8 @@ export type ServerEvent =
   | { type: "voice"; roomId: number }
   | { type: "call"; toUserId: string; roomId: number }
   | { type: "call-declined"; toUserId: string; roomId: number }
+  /** The call in this room is over (the other person hung up, or everyone left): stop ringing, close call screens. */
+  | { type: "call-ended"; toUserId: string; roomId: number }
   | {
       type: "watchparty.sync";
       roomId: number;

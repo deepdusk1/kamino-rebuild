@@ -47,7 +47,7 @@ export const Route = createFileRoute("/api/events")({
               let visible = false;
               try {
                 visible =
-                  event.type === "call" || event.type === "call-declined"
+                  event.type === "call" || event.type === "call-declined" || event.type === "call-ended"
                     ? event.toUserId === userId
                     : await canSeeRoom(event.roomId);
               } catch {

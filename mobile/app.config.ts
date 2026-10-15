@@ -39,6 +39,8 @@ const config: ExpoConfig = {
       NSPhotoLibraryUsageDescription: "Kamino needs your photos so you can pick pictures and videos to share.",
       NSMicrophoneUsageDescription: "Kamino uses the microphone to record voice messages and video, and so others can hear you in calls.",
       ITSAppUsesNonExemptEncryption: false,
+      // "audio" keeps a call running while Kamino is in the background (the microphone stays live).
+      UIBackgroundModes: ["audio"],
     },
   },
   android: {
@@ -62,7 +64,8 @@ const config: ExpoConfig = {
     "expo-secure-store",
     "expo-font",
     ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 160, backgroundColor: "#f8f7ff", dark: { backgroundColor: "#15112a" } }],
-    ["expo-notifications", { color: "#6947d5" }],
+    // enableBackgroundRemoteNotifications: lets iOS wake Kamino for data-only pushes (e.g. "call ended").
+    ["expo-notifications", { color: "#6947d5", enableBackgroundRemoteNotifications: true }],
     [
       "expo-image-picker",
       {
@@ -79,6 +82,8 @@ const config: ExpoConfig = {
         microphonePermission: "Kamino uses the microphone so others can hear you in a call.",
       },
     ],
+    // Keeps a call going when Kamino is in the background on Android (see plugins/with-call-service.js).
+    "./plugins/with-call-service",
   ],
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL ?? "",

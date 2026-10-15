@@ -34,6 +34,10 @@ test("references round-trip and data URLs are not references", () => {
   assert.deepEqual(parseMediaRef("s3:chat/1f2e-3d|image/jpeg"), { key: "chat/1f2e-3d", mime: "image/jpeg" });
   assert.equal(parseMediaRef("s3:../etc/passwd|image/png"), null, "a key can not climb out of its folder");
   assert.equal(parseMediaRef("s3:chat/x|not a mime"), null);
+  // Room recordings keep their .mp4 ending; only one extension, at the very end, is allowed.
+  assert.deepEqual(parseMediaRef("s3:recordings/4/ab-12.mp4|video/mp4"), { key: "recordings/4/ab-12.mp4", mime: "video/mp4" });
+  assert.equal(parseMediaRef("s3:recordings/../x.mp4|video/mp4"), null);
+  assert.equal(parseMediaRef("s3:recordings/a.mp4/b|video/mp4"), null);
 });
 
 test("files still inside the database keep working when storage is off", async () => {

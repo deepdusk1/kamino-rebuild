@@ -899,6 +899,11 @@ export const updateGroupChat = createServerFn({ method: "POST" })
         await tx`update chat_members set room_removed=true,in_voice=false,group_role='member' where room_id=${data.roomId} and user_id=${data.removeUserId}`;
       }
     });
+    if (data.removeUserId) {
+      // Someone removed from the group is also dropped from a call that is going on.
+      const { syncLiveKitParticipants } = await import("./livekit.server");
+      await syncLiveKitParticipants(sql, data.roomId, [data.removeUserId]);
+    }
     if(data.addHandle) {
       const peer=(await sql`select user_id from profiles where handle=${data.addHandle.replace(/^@/,"").toLowerCase()}`)[0];
       if(peer) await notify(sql,String(peer.user_id),"invite","Group invitation",String(r.name),"/connections",{actorId:userId});

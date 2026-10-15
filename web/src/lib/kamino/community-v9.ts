@@ -401,6 +401,7 @@ const stageConfigSchema=z.object({roomId:idSchema,enabled:z.boolean().optional()
 export const configureLiveStage=createServerFn({method:'POST'}).middleware([authMiddleware]).validator((d:z.infer<typeof stageConfigSchema>)=>stageConfigSchema.parse(d)).handler(async({context,data})=>{
   const sql=await db(),uid=(context as Authed).userId,room=await internals.requireRoomAccess(sql,uid,data.roomId);if(!await stageHost(sql,uid,room))throw new Error('Only hosts or community moderators can change the live room.');
   if(data.enabled!==undefined){await sql`update chat_rooms set stage_enabled=${data.enabled} where id=${data.roomId}`;if(data.enabled){await sql`update chat_members set stage_role='speaker',host_muted=false where room_id=${data.roomId} and user_id=${String(room.created_by)}`;await sql`update chat_members set stage_role='listener',host_muted=false where room_id=${data.roomId} and user_id<>${String(room.created_by)}`;}}
+  if(data.enabled!==undefined){const {inVoiceMembers,syncLiveKitParticipants}=await import('./livekit.server');await syncLiveKitParticipants(sql,data.roomId,await inVoiceMembers(sql,data.roomId));}
   if(data.locked!==undefined)await sql`update chat_rooms set locked=${data.locked} where id=${data.roomId}`;
   if(data.scheduledAt!==undefined){const date=data.scheduledAt?eventOccurrences(data.scheduledAt,undefined,'none')[0]!.startsAt:null;await sql`update chat_rooms set scheduled_at=${date} where id=${data.roomId}`;}
   if(room.community_id)await audit(sql,String(room.community_id),uid,'stage:configure',String(data.roomId));return {ok:true};
@@ -422,6 +423,8 @@ export const actLiveStage=createServerFn({method:'POST'}).middleware([authMiddle
   if(data.action==='remove'||data.action==='restore')await sql`update chat_members set room_removed=${data.action==='remove'},in_voice=false,hand_raised=false where room_id=${data.roomId} and user_id=${target}`;
   if(data.action==='cohost')await sql`insert into room_cohosts(room_id,user_id) values(${data.roomId},${target}) on conflict do nothing`;
   if(data.action==='uncohost')await sql`delete from room_cohosts where room_id=${data.roomId} and user_id=${target}`;
+  // Someone connected to the call gets their new speaking rights (or is removed) in LiveKit straight away.
+  if(!selfAction){const {syncLiveKitParticipants}=await import('./livekit.server');await syncLiveKitParticipants(sql,data.roomId,[target]);}
   if(room.community_id&&!selfAction)await audit(sql,String(room.community_id),uid,`stage:${data.action}`,`${data.roomId}; ${target}`);return {ok:true};
 });
 const liveReactionSchema=z.object({roomId:idSchema,emoji:z.enum(['❤️','👏','🔥','😂','✨','🎉'])});
