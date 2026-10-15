@@ -596,7 +596,7 @@ export function FilterSheet({
         <span className="min-w-0 flex-1">
           <span className="block text-[15px] font-bold text-ink">Safe search</span>
           <span className="block text-[12.5px] text-muted">
-            Hide 16+ communities and ones with content warnings.
+            Hide communities and posts that have content warnings.
           </span>
         </span>
         <input

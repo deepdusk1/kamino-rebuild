@@ -1,10 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useState, type ReactNode } from "react";
 import { Switch, View } from "react-native";
 import { api } from "@/api/endpoints";
-import type { CommunityCardData, HallEvent, LiveRoomCard, SearchEverything } from "@/api/types";
+import type { CommunityCardData, HallEvent, LiveRoomCard } from "@/api/types";
 import { PostCard } from "@/components/PostCard";
 import {
   AvatarStack, CATEGORIES, CategoryChip, EmptyHint, FilterPills, GradientButton, JoinButton, LiveBadge, Picture, PersonAvatar, SectionHeader, VerifiedTick,
@@ -17,10 +17,11 @@ import { compactNumber, timeAgo } from "@/lib/format";
 import { tapJoinButton, joinButtonLabel } from "@/lib/community-join";
 import { followLabel, setFollow, wantsFollow, type FollowState } from "@/lib/follow";
 import { font, radius, shadow, useTheme } from "@/theme";
-import { DEFAULT_FILTERS, LANGUAGE_OPTIONS, SIZE_OPTIONS, SORT_OPTIONS, cleanTag, tagLabel, type SearchFilters } from "./helpers";
+import { DEFAULT_FILTERS, LANGUAGE_OPTIONS, SIZE_OPTIONS, SORT_OPTIONS, bestTab, cleanTag, tagLabel, type ResultTab, type SearchFilters } from "./helpers";
 import { serverImage } from "./media";
 
-export type ResultTab = "people" | "communities" | "posts" | "tags" | "rooms" | "events";
+
+export type { ResultTab } from "./helpers";
 
 const TABS: { key: ResultTab; label: string; icon: FilterItem["icon"] }[] = [
   { key: "people", label: "People", icon: "person-outline" },
@@ -30,13 +31,6 @@ const TABS: { key: ResultTab; label: string; icon: FilterItem["icon"] }[] = [
   { key: "rooms", label: "Rooms", icon: "radio-outline" },
   { key: "events", label: "Events", icon: "calendar-outline" },
 ];
-
-/** Which tab to open first when the person hasn't picked one: the most useful one that has results. */
-function bestTab(r: SearchEverything | undefined, isTag: boolean): ResultTab {
-  if (!r) return "communities";
-  const order: ResultTab[] = isTag ? ["posts", "tags", "communities", "people", "rooms", "events"] : ["communities", "posts", "people", "tags", "rooms", "events"];
-  return order.find((k) => r[k].length > 0) ?? "communities";
-}
 
 // ── Recent searches (empty search box) ───────────────────────────────────────
 
@@ -140,9 +134,11 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
   const queryClient = useQueryClient();
 
   const input = { q: term, kind: "all" as const, category: filters.category || undefined, sort: filters.sort, minMembers: filters.minMembers || undefined, language: filters.language || undefined, safe: filters.safe || undefined };
-  const results = useQuery({ queryKey: ["searchEverything", input], queryFn: () => api.searchEverything(input) });
+  // Keep showing the last results while the next ones load, instead of flashing an empty skeleton on every letter.
+  const results = useQuery({ queryKey: ["searchEverything", input], queryFn: () => api.searchEverything(input), placeholderData: keepPreviousData });
   const r = results.data;
-  const tab = picked ?? bestTab(r, term.startsWith("#"));
+  const tab = picked ?? bestTab(r, term);
+  const otherTabs = r ? TABS.filter((t) => t.key !== tab && r[t.key].length > 0) : [];
 
   async function toggleJoin(c: CommunityCardData) {
     const isIn = joined[c.id] ?? c.joined;
@@ -175,14 +171,28 @@ export function SearchResults({ term, filters, onPickQuery }: ResultsProps) {
   return (
     <View style={{ gap: 12 }}>
       {term ? <FilterPills items={items} value={tab} onChange={(k) => setPicked(k as ResultTab)} /> : null}
-      <View style={{ paddingHorizontal: 16, gap: 10 }}>
+      <View style={{ paddingHorizontal: 16, gap: 10, opacity: results.isPlaceholderData ? 0.55 : 1 }} accessibilityState={{ busy: results.isFetching }}>
         {r?.fuzzy ? <Txt style={{ fontFamily: font.regular, fontSize: 12.5, color: theme.muted }}>No exact matches, so here are the closest ones.</Txt> : null}
         {results.isPending ? (
           <SkeletonList count={3} />
         ) : results.isError ? (
           <EmptyHint icon="cloud-offline-outline" title="Search didn't load" text="Check your connection and try again." actionLabel="Try again" onAction={() => void results.refetch()} />
         ) : !r || r[tab].length === 0 ? (
-          <EmptyHint emoji="🔍" title={term ? `No ${tab} for “${term}”` : "No communities match these filters"} text={term ? "Try another spelling, or a #hashtag." : "Try fewer filters."} />
+          <EmptyHint
+            emoji="🔍"
+            title={term ? `No ${TABS.find((t) => t.key === tab)!.label.toLowerCase()} for “${term}”` : "No communities match these filters"}
+            text={
+              otherTabs.length
+                ? `There are matches in ${otherTabs.map((t) => t.label).join(", ")}.`
+                : term.startsWith("@")
+                  ? "Check the username, or search their name without the @."
+                  : term
+                    ? "Try another spelling, a #hashtag, or fewer filters."
+                    : "Try fewer filters."
+            }
+            actionLabel={otherTabs.length ? `Show ${otherTabs[0]!.label}` : undefined}
+            onAction={otherTabs.length ? () => setPicked(otherTabs[0]!.key) : undefined}
+          />
         ) : tab === "communities" ? (
           r.communities.map((c, i) => (
             <CommunityResult key={c.id} c={c} index={i} joined={joined[c.id] ?? c.joined} busy={busy === c.id} onJoin={() => void toggleJoin(c)} />
@@ -325,7 +335,7 @@ export function FilterSheet({ visible, value, onApply, onClose }: FilterSheetPro
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12, minHeight: 48 }}>
         <View style={{ flex: 1 }}>
           <Txt style={{ fontFamily: font.bold, fontSize: 15, color: theme.ink }}>Safe search</Txt>
-          <Txt style={{ fontFamily: font.regular, fontSize: 12.5, color: theme.muted }}>Hide 16+ communities and ones with content warnings.</Txt>
+          <Txt style={{ fontFamily: font.regular, fontSize: 12.5, color: theme.muted }}>Hide communities and posts that have content warnings.</Txt>
         </View>
         <Switch value={draft.safe} onValueChange={(v) => set("safe", v)} trackColor={{ true: theme.violet, false: theme.border }} thumbColor="#fff" accessibilityLabel="Safe search" />
       </View>

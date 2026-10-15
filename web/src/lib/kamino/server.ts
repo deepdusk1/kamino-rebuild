@@ -1,5 +1,6 @@
 import { createServerFn, createServerOnlyFn } from "@tanstack/react-start";
 import { z } from "zod";
+import { containsPattern, escapeLike, longEnough, parseSearchQuery, prefixPattern } from "./search-text";
 import { getSql, type Sql } from "@/lib/db";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { hashHue, levelFromRep, slugify } from "@/lib/utils";
@@ -2504,13 +2505,15 @@ export const transferRoomHost = createServerFn({ method: "POST" })
 
 export const searchRoomMessages = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
-  .validator((data: { roomId: number; query: string }) => data)
+  .validator((data: { roomId: number; query: string }) =>
+    z.object({ roomId: z.number().int().positive(), query: z.string().max(200) }).parse(data),
+  )
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
     await requireRoomAccess(sql, userId, data.roomId);
-    const query = data.query.trim().slice(0, 100);
-    if (query.length < 2) return [] as ChatMessage[];
+    const query = data.query.replace(/\s+/g, " ").trim().slice(0, 100);
+    if (!longEnough(query.toLowerCase())) return [] as ChatMessage[];
     const raw = await sql.query(
       `select m.*, mb.nickname, mb.persona_hue, pr.handle, pr.display_name, pr.avatar_hue, pr.avatar_version,
               coalesce(pr.bubble_hue, 270) as bubble_hue, coalesce(pr.bubble_style, 'soft') as bubble_style, mm.kind as media_kind
@@ -2520,8 +2523,9 @@ export const searchRoomMessages = createServerFn({ method: "GET" })
        left join memberships mb on mb.user_id = m.author_user_id and mb.community_id = r.community_id
        left join profiles pr on pr.user_id = m.author_user_id
        where m.room_id = $1 and m.deleted = false and m.held = false and m.body ilike $2
+         and m.body not like '::sticker:%'
        order by m.id desc limit 40`,
-      [data.roomId, `%${query}%`],
+      [data.roomId, `%${escapeLike(query)}%`],
     );
     const blocked = await blockedSet(sql, userId);
     return raw.map(mapMessage).filter((m) => !blocked.has(m.author.userId));
@@ -3944,16 +3948,18 @@ export const searchPeople = createServerFn({ method: "GET" })
   .validator((q: string) => q)
   .handler(async ({ data: q }) => {
     const sql = await db();
-    const term = q.trim().slice(0, 40);
-    if (term.length < 2)
+    const { term } = parseSearchQuery(String(q ?? "").slice(0, 40));
+    if (!longEnough(term))
       return [] as { handle: string; displayName: string; bio: string; hue: number; rep: number }[];
-    const like = `%${term.replace(/[%_]/g, "")}%`;
+    // Underscores in usernames are searched as underscores (they used to be dropped), and only adults who passed the
+    // age check and chose to be findable are listed.
     const rows = await sql`
       select handle, display_name, bio, avatar_hue, rep
       from profiles
-      where search_visible = true and (handle ilike ${like} or display_name ilike ${like})
+      where search_visible = true and (min_age_confirmed_at is not null or user_id like 'seed:%')
+        and (handle ilike ${containsPattern(term)} or display_name ilike ${containsPattern(term)})
         and not exists (select 1 from identity_account_status s where s.user_id = profiles.user_id and (s.status = 'banned' or (s.status = 'suspended' and (s.until is null or s.until > now()))))
-      order by rep desc
+      order by (lower(handle) = ${term}) desc, (handle ilike ${prefixPattern(term)}) desc, rep desc
       limit 12
     `;
     return rows.map((r) => ({

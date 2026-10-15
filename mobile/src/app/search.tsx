@@ -5,7 +5,7 @@ import { useState } from "react";
 import { Keyboard, ScrollView, StyleSheet, TextInput, View } from "react-native";
 import { api } from "@/api/endpoints";
 import { FilterSheet, RecentSearches, SearchResults } from "@/components/community/ExploreSearch";
-import { DEFAULT_FILTERS, activeFilterCount, type SearchFilters } from "@/components/community/helpers";
+import { DEFAULT_FILTERS, activeFilterCount, searchReady, type SearchFilters } from "@/components/community/helpers";
 import { AppHeader } from "@/components/k";
 import { PressableScale, useTabBarSpace } from "@/components/ui";
 import { useDebounced } from "@/lib/useDebounced";
@@ -27,7 +27,7 @@ export default function Search() {
   const trending = useQuery({ queryKey: ["exploreOverview", "forYou"], queryFn: () => api.exploreOverview(undefined) });
   const term = useDebounced(query.trim(), 300);
   const filterCount = activeFilterCount(filters);
-  const showResults = term.replace(/^#/, "").length >= 2 || (!term && filterCount > 0);
+  const showResults = searchReady(term, filterCount);
 
   const pick = (q: string) => {
     setQuery(q);
@@ -44,9 +44,11 @@ export default function Search() {
             value={query}
             onChangeText={setQuery}
             autoFocus={!params.q}
-            placeholder="Search people, communities, posts, #tags"
+            placeholder="Search people, communities, posts, #tags, @names"
             placeholderTextColor={theme.subtle}
             returnKeyType="search"
+            onSubmitEditing={() => Keyboard.dismiss()}
+            maxLength={60}
             autoCorrect={false}
             autoCapitalize="none"
             selectionColor={theme.accent}

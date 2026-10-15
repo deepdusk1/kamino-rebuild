@@ -23,7 +23,7 @@ async function search(sql:Sql,userId:string,vector:number[],namespace:string,kin
     and ${internals.communityAccessSql('$1')} and not exists(select 1 from discovery_feedback f where f.user_id=$1 and f.preference='hide' and f.target_type='community' and f.target_id=c.id) and ($4::text is null or c.id=$4) group by c.id`);
   if(kind==='all'||kind==='person')parts.push(`select 'person',p.user_id,p.display_name,left(p.headline,240),'/u/'||p.handle,max(kamino_cosine(d.embedding,$3::double precision[]))
     from semantic_documents d join profiles p on p.user_id=d.owner_id where d.namespace=$2 and d.kind='person'
-    and d.revision=md5(p.display_name||E'\\n'||p.bio||E'\\n'||p.headline||E'\\n'||p.interests) and p.search_visible=true and ${peerFilter('p.user_id')}
+    and d.revision=md5(p.display_name||E'\\n'||p.bio||E'\\n'||p.headline||E'\\n'||p.interests) and p.search_visible=true and (p.min_age_confirmed_at is not null or p.user_id like 'seed:%') and ${peerFilter('p.user_id')}
     and (p.private_account=false or p.user_id=$1 or exists(select 1 from profile_follows f where f.follower_id=$1 and f.followee_id=p.user_id))
     and (p.user_id=$1 or ((p.age_eligible_at_18<=current_date)=(select age_eligible_at_18<=current_date from profiles where user_id=$1))) and $4::text is null
     and not exists(select 1 from discovery_feedback f where f.user_id=$1 and f.preference='hide' and f.target_type='creator' and f.target_id=p.user_id) group by p.user_id`);
