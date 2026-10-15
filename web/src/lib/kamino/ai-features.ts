@@ -8,7 +8,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import type { Sql } from "@/lib/db";
-import { AiUnavailableError, aiConfig, budgetLeft, chatComplete } from "./ai.server";
 import { guard } from "./guard";
 import { asBool, iso, parseJson } from "./map";
 import { optionalAuth, type Viewer } from "./optional-auth";
@@ -27,8 +26,15 @@ import {
   type TurnForPrompt,
 } from "./roleplay";
 import { canModerate, scanText } from "./safety";
-import { isSiteAdmin, reviewContent, takeDown, unhide } from "./safety.server";
 import { internals } from "./server";
+
+/**
+ * Server-only modules, imported lazily so the client bundle never pulls them in.
+ * TanStack Start blocks `*.server.*` imports in client code; these helpers keep
+ * every `createServerFn` handler working while the static import graph stays clean.
+ */
+const aiServer = () => import("./ai.server");
+const safetyServer = () => import("./safety.server");
 import type {
   AiStatus,
   RoleplayScene,
@@ -57,6 +63,7 @@ const STORYTELLER = "kamino:storyteller";
 
 export const getAiStatus = createServerFn({ method: "GET" }).handler(
   async (): Promise<AiStatus> => {
+    const { aiConfig, budgetLeft } = await aiServer();
     const config = aiConfig();
     const sql = await db();
     return {
@@ -116,6 +123,7 @@ export const listSiteSafetyFlags = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const sql = await db();
+    const { isSiteAdmin } = await safetyServer();
     const { userId } = context as Authed;
     if (!(await isSiteAdmin(sql, userId))) throw new Error("Site owners only.");
     const rows = await sql.query(
@@ -129,6 +137,7 @@ export const getSafetyRole = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const sql = await db();
+    const { isSiteAdmin } = await safetyServer();
     return { siteAdmin: await isSiteAdmin(sql, (context as Authed).userId) };
   });
 
@@ -154,6 +163,7 @@ export const reviewSafetyFlag = createServerFn({ method: "POST" })
   })
   .handler(async ({ context, data }) => {
     const sql = await db();
+    const { isSiteAdmin, unhide, takeDown } = await safetyServer();
     const { userId } = context as Authed;
     const row = (await sql`select * from safety_flags where id = ${data.id}`)[0];
     if (!row) throw new Error("That item is no longer in the queue.");
@@ -269,6 +279,8 @@ export async function storytellerWrites(
   kind: "narration" | "ending",
   extra: string,
 ): Promise<number> {
+  const { chatComplete, AiUnavailableError } = await aiServer();
+  const { reviewContent } = await safetyServer();
   const turns = await turnsForPrompt(sql, scene.row.id);
   const cast = scene.cast.map((c) => ({ name: c.character_name, player: c.user_id }));
   const header = {
@@ -312,6 +324,7 @@ export async function storytellerWrites(
 
 /** Runs the storyteller but never lets its failure undo what the member did; returns a message to show instead. */
 export async function tryStoryteller(run: () => Promise<unknown>): Promise<string | null> {
+  const { AiUnavailableError } = await aiServer();
   try {
     await run();
     return null;
@@ -448,6 +461,7 @@ export const draftScene = createServerFn({ method: "POST" })
   .validator((d: { slug: string; source?: string; idea: string }) => d)
   .handler(async ({ context, data }) => {
     const sql = await db();
+    const { chatComplete, AiUnavailableError } = await aiServer();
     const { userId } = context as Authed;
     await requireScenePlay(sql, userId, data.slug);
     await guard(userId, "ai");
@@ -487,6 +501,8 @@ export const createScene = createServerFn({ method: "POST" })
   )
   .handler(async ({ context, data }) => {
     const sql = await db();
+    const { aiConfig } = await aiServer();
+    const { reviewContent } = await safetyServer();
     const { userId } = context as Authed;
     await requireScenePlay(sql, userId, data.slug);
     await guard(userId, "post");
@@ -611,6 +627,8 @@ export const addTurn = createServerFn({ method: "POST" })
   .validator((d: { sceneId: number; body: string; narrate?: boolean }) => d)
   .handler(async ({ context, data }) => {
     const sql = await db();
+    const { aiConfig } = await aiServer();
+    const { reviewContent } = await safetyServer();
     const { userId } = context as Authed;
     await guard(userId, "message");
     const scene = await loadScene(sql, data.sceneId);
