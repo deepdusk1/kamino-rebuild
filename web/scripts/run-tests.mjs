@@ -21,5 +21,6 @@ files.push('src/lib/i18n/i18n.test.ts');
 files.push('src/lib/kamino/story.server.test.ts');
 files.push('src/lib/kamino/calls.server.test.ts');
 files.push('src/lib/auth/link-guard.test.ts');
+files.push('src/lib/kamino/chat-send.server.test.ts');
 const result=spawnSync(process.execPath,['--experimental-strip-types','--test','--test-concurrency=2',...new Set(files)],{stdio:'inherit'});
 process.exit(result.status??1);

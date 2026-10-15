@@ -215,6 +215,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signOut: async () => {
         await unregisterPushDevice().catch(() => undefined);
         await authRequest("sign-out", {}).catch(() => undefined); // best effort: local sign-out must always work
+        // Unsent messages are private too: they don't stay on the phone after signing out.
+        if (userId) {
+          const { clearQueue } = await import("@/lib/offline-queue");
+          await clearQueue(userId).catch(() => undefined);
+        }
         setNotice(null);
         await clearLocal();
       },

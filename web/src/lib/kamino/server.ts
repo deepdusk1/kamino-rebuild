@@ -2250,6 +2250,44 @@ export const listRooms = createServerFn({ method: "GET" })
     return rows.map(mapRoom);
   });
 
+/**
+ * A page of a room's messages, oldest first: the newest `limit` after `afterId`, or the `limit` just before
+ * `beforeId` (scrolling back through history). Held (unreviewed) messages and people you blocked are left out.
+ */
+async function loadRoomMessages(
+  sql: Sql,
+  roomId: number,
+  userId: string,
+  page: { afterId?: number; beforeId?: number; limit: number },
+) {
+  const blocked = await blockedSet(sql, userId);
+  const raw = await sql.query(
+    `select m.*, mb.nickname, mb.persona_hue, pr.handle, pr.display_name, pr.avatar_hue, pr.avatar_version,
+            coalesce(pr.bubble_hue, 270) as bubble_hue, coalesce(pr.bubble_style, 'soft') as bubble_style,
+            mm.kind as media_kind
+     from messages m
+     left join chat_rooms r on r.id = m.room_id
+     left join message_media mm on mm.message_id = m.id
+     left join memberships mb on mb.user_id = m.author_user_id and mb.community_id = r.community_id
+     left join profiles pr on pr.user_id = m.author_user_id
+     where m.room_id = $1 and m.id > $2 and ($3::int is null or m.id < $3) and m.held = false
+     order by m.id desc
+     limit $4`,
+    [roomId, page.afterId ?? 0, page.beforeId ?? null, page.limit],
+  );
+  const messages = await withMessageReactions(
+    sql,
+    roomId,
+    userId,
+    raw
+      .reverse()
+      .map(mapMessage)
+      .filter((m) => !blocked.has(m.author.userId)),
+  );
+  // `full`: the page was full before blocked people were taken out, so there may be more before it.
+  return { messages, full: raw.length === page.limit };
+}
+
 export const getRoom = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .validator((d: { roomId: number; afterId?: number }) => d)
@@ -2257,30 +2295,7 @@ export const getRoom = createServerFn({ method: "GET" })
     const sql = await db();
     const { userId } = context as Authed;
     const roomRow = await requireRoomAccess(sql, userId, data.roomId);
-    const blocked = await blockedSet(sql, userId);
-    const raw = await sql.query(
-      `select m.*, mb.nickname, mb.persona_hue, pr.handle, pr.display_name, pr.avatar_hue, pr.avatar_version,
-              coalesce(pr.bubble_hue, 270) as bubble_hue, coalesce(pr.bubble_style, 'soft') as bubble_style,
-              mm.kind as media_kind
-       from messages m
-       left join chat_rooms r on r.id = m.room_id
-       left join message_media mm on mm.message_id = m.id
-       left join memberships mb on mb.user_id = m.author_user_id and mb.community_id = r.community_id
-       left join profiles pr on pr.user_id = m.author_user_id
-       where m.room_id = $1 and m.id > $2 and m.held = false
-       order by m.id desc
-       limit 200`,
-      [data.roomId, data.afterId ?? 0],
-    );
-    const messages = await withMessageReactions(
-      sql,
-      data.roomId,
-      userId,
-      raw
-        .reverse()
-        .map(mapMessage)
-        .filter((m) => !blocked.has(m.author.userId)),
-    );
+    const { messages } = await loadRoomMessages(sql, data.roomId, userId, { afterId: data.afterId ?? 0, limit: 200 });
     const voices = await sql<{ user_id: string; nickname: string }>`
       select cm.user_id, coalesce(mb.nickname, pr.display_name, 'Member') as nickname
       from chat_members cm
@@ -2290,9 +2305,9 @@ export const getRoom = createServerFn({ method: "GET" })
       where cm.room_id = ${data.roomId} and cm.in_voice = true and cm.room_removed = false
         and (r.community_id is null or mb.status = 'active')
     `;
-    await sql`update chat_members set last_read_at = now(),
-      last_read_id = greatest(last_read_id, coalesce((select max(id) from messages where room_id = ${data.roomId}), 0))
-      where room_id = ${data.roomId} and user_id = ${userId}`;
+    // Opening the room clears its unread count. "Seen" (last_read_id) is only moved by markRoomRead, which the apps
+    // call themselves, and never for a message request you haven't accepted (the sender mustn't see "Seen" yet).
+    await sql`update chat_members set last_read_at = now() where room_id = ${data.roomId} and user_id = ${userId}`;
     const pref = (
       await sql`select pinned, muted from chat_members where room_id = ${data.roomId} and user_id = ${userId}`
     )[0];
@@ -2480,27 +2495,8 @@ export const getOlderMessages = createServerFn({ method: "GET" })
     const { userId } = context as Authed;
     await requireRoomAccess(sql, userId, data.roomId);
     if (!Number.isSafeInteger(data.beforeId) || data.beforeId < 1) throw new Error("Invalid page.");
-    const blocked = await blockedSet(sql, userId);
-    const raw = await sql.query(
-      `select m.*, mb.nickname, mb.persona_hue, pr.handle, pr.display_name, pr.avatar_hue, pr.avatar_version,
-              coalesce(pr.bubble_hue, 270) as bubble_hue, coalesce(pr.bubble_style, 'soft') as bubble_style, mm.kind as media_kind
-       from messages m left join chat_rooms r on r.id = m.room_id
-       left join message_media mm on mm.message_id = m.id
-       left join memberships mb on mb.user_id = m.author_user_id and mb.community_id = r.community_id
-       left join profiles pr on pr.user_id = m.author_user_id
-       where m.room_id = $1 and m.id < $2 and m.held = false order by m.id desc limit 50`,
-      [data.roomId, data.beforeId],
-    );
-    const messages = await withMessageReactions(
-      sql,
-      data.roomId,
-      userId,
-      raw
-        .reverse()
-        .map(mapMessage)
-        .filter((m) => !blocked.has(m.author.userId)),
-    );
-    return { messages, hasMore: raw.length === 50 };
+    const { messages, full } = await loadRoomMessages(sql, data.roomId, userId, { beforeId: data.beforeId, limit: 50 });
+    return { messages, hasMore: full };
   });
 
 export const getMessageMedia = createServerFn({ method: "GET" })
@@ -2587,14 +2583,13 @@ export const sendMessage = createServerFn({ method: "POST" })
         if (count >= 100) throw new Error('Teen accounts can send up to 100 direct or group messages per day. Try again tomorrow.');
       }
     }
-    // Offline replay safety: the phone app tags each message it queues, so a retry after a
-    // reconnect returns the original instead of posting a second copy.
-    if (data.clientTag) {
-      const tag = String(data.clientTag).slice(0, 64);
-      if (!/^[A-Za-z0-9_-]+$/.test(tag)) throw new Error("Invalid message tag.");
-      const existing = (await sql<{ id: number }>`select id from messages where client_tag = ${tag} and room_id = ${data.roomId}`)[0];
-      if (existing) return { id: Number(existing.id), duplicate: true };
-    }
+    // Offline replay safety: the phone app tags each message before its first attempt, so a retry (timeout,
+    // offline queue) returns the original instead of posting a second copy. See chat-send.server.ts.
+    const { cleanClientTag, findTaggedMessage, insertChatMessage } = await import("./chat-send.server");
+    if (data.clientTag != null && !cleanClientTag(data.clientTag)) throw new Error("Invalid message tag.");
+    const clientTag = cleanClientTag(data.clientTag);
+    const existing = await findTaggedMessage(sql, userId, clientTag);
+    if (existing !== null) return { id: existing, duplicate: true, held: false };
     const media = checkedChatMedia(data.media);
     const body = data.body.trim().slice(0, 2000);
     if (!body && !media) throw new Error("Write a message or attach media first.");
@@ -2608,14 +2603,16 @@ export const sendMessage = createServerFn({ method: "POST" })
       const err = scanText(body);
       if (err) throw new Error(err);
     }
-    const clientTag = data.clientTag && /^[A-Za-z0-9_-]+$/.test(String(data.clientTag).slice(0, 64))
-      ? String(data.clientTag).slice(0, 64)
-      : null;
-    const rows = await sql<{ id: number }>`
-      insert into messages (room_id, author_user_id, body, reply_to, held, client_tag)
-      values (${data.roomId}, ${userId}, ${body}, ${data.replyTo ?? null}, true, ${clientTag})
-      returning id
-    `;
+    const saved = await insertChatMessage(sql, {
+      roomId: data.roomId,
+      userId,
+      body,
+      replyTo: data.replyTo ?? null,
+      clientTag,
+    });
+    // A parallel retry saved it first: that copy is (or will be) the one everybody sees.
+    if (saved.duplicate) return { id: saved.id, duplicate: true, held: false };
+    const rows = [{ id: saved.id }];
     if (media) {
       try {
         const stored = await storeMedia("chat", media.dataUrl);
@@ -4566,7 +4563,11 @@ export const editMessage = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
-    await requireRoomAccess(sql, userId, data.roomId);
+    await guard(userId, "message");
+    await requireMinAge(sql, userId);
+    const editRoom = await requireRoomAccess(sql, userId, data.roomId);
+    // Someone muted in a community can't change what they already wrote either.
+    if (editRoom.community_id) await assertNotMuted(sql, userId, String(editRoom.community_id));
     const body = data.body.trim().slice(0, 2000);
     if (!body) throw new Error("Write a message first.");
     if (!parseSticker(body)) {

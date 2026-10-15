@@ -2,7 +2,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, View } from "react-native";
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Pressable, View } from "react-native";
 import { api } from "@/api/endpoints";
 import type { ChatMessage } from "@/api/types";
 import { ChatBanner, ChatHeader, ChatInputBar, TypingBubble } from "@/components/chat/ChatChrome";
@@ -25,7 +25,16 @@ import { useVoiceRecorder } from "@/lib/useVoiceRecorder";
 import { font, radius, useTheme } from "@/theme";
 import { ChatContentTools, ChatMessageContent } from "@/components/content/ChatContentTools";
 import { StageControlsV9 } from "@/components/StageControlsV9";
-import { enqueueMessage, newClientTag } from "@/lib/offline-queue";
+import {
+  discardQueued,
+  enqueueMessage,
+  flushNow,
+  newClientTag,
+  onQueueChange,
+  queuedForRoom,
+  retryQueued,
+  type QueuedMessage,
+} from "@/lib/offline-queue";
 
 const REACTIONS = ["❤️", "😂", "✨", "🔥", "👏", "😮"];
 type Media = { kind: "image" | "audio" | "video"; dataUrl: string };
@@ -65,11 +74,74 @@ export default function ChatRoom() {
   const voice = useVoiceRecorder();
   const list = useRef<FlatList<ChatMessage>>(null);
 
-  const messages = room.data?.messages;
+  // The newest messages come from `room` (polled); older ones are loaded page by page when you scroll back.
+  const latest = room.data?.messages;
+  const [older, setOlder] = useState<ChatMessage[]>([]);
+  const [olderState, setOlderState] = useState<"idle" | "loading" | "done">("idle");
+  const messages = useMemo(() => {
+    const newest = latest ?? [];
+    const firstLatest = newest[0]?.id ?? Number.POSITIVE_INFINITY;
+    // (roomId check: the same screen can be reused for another conversation.)
+    return [...older.filter((m) => m.roomId === roomId && m.id < firstLatest), ...newest];
+  }, [older, latest, roomId]);
   const byId = useMemo(() => new Map((messages ?? []).map((m) => [m.id, m])), [messages]);
   const newestFirst = useMemo(() => [...(messages ?? [])].reverse(), [messages]);
   const myId = me.data?.profile.userId;
   const newestId = newestFirst[0]?.id ?? 0;
+
+  /** Scrolling back past the newest page loads 50 older messages at a time. */
+  const loadOlder = async () => {
+    const oldest = messages[0]?.id;
+    // The newest page holds up to 200; fewer means the whole conversation is already here.
+    if (olderState !== "idle" || !oldest || (older.length === 0 && (latest?.length ?? 0) < 200)) return;
+    setOlderState("loading");
+    try {
+      const page = await api.olderMessages(roomId, oldest);
+      setOlder((current) => {
+        const known = new Set(current.map((m) => m.id));
+        return [...page.messages.filter((m) => !known.has(m.id)), ...current];
+      });
+      setOlderState(page.hasMore ? "idle" : "done");
+    } catch {
+      setOlderState("idle"); // try again on the next scroll
+    }
+  };
+
+  // Messages waiting in the offline queue (or refused) for this room, shown after the sent ones.
+  const [pending, setPending] = useState<QueuedMessage[]>([]);
+  useEffect(() => {
+    if (!myId || !Number.isFinite(roomId)) return;
+    let alive = true;
+    const load = () =>
+      void queuedForRoom(myId, roomId).then((entries) => {
+        if (alive) setPending(entries);
+      });
+    load();
+    const off = onQueueChange(() => {
+      load();
+      // Anything that just went out appears in the conversation.
+      void queryClient.invalidateQueries({ queryKey: ["room", roomId] });
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [myId, roomId, queryClient]);
+
+  const managePending = (entry: QueuedMessage) => {
+    if (!myId) return;
+    Alert.alert(
+      entry.failed ? "Message not sent" : "Waiting to send",
+      entry.failed ?? "This message will be sent as soon as you're back online.",
+      [
+        { text: "Delete", style: "destructive", onPress: () => void discardQueued(myId, entry.clientTag) },
+        ...(entry.failed
+          ? [{ text: "Try again", onPress: () => void retryQueued(myId, entry.clientTag).then(flushNow) }]
+          : [{ text: "Send now", onPress: flushNow }]),
+        { text: "Cancel", style: "cancel" as const },
+      ],
+    );
+  };
 
   // Tell the server what we've read (not for message requests: the sender shouldn't see "Seen" before you accept).
   const markedRef = useRef(0);
@@ -101,53 +173,65 @@ export default function ChatRoom() {
     void queryClient.invalidateQueries({ queryKey: ["chatsOverview"] });
   };
 
+  const sendingRef = useRef(false);
+  /**
+   * Sends what's in the box (or saves an edit). A photo or clip takes the text as its caption; a voice note doesn't.
+   * Without a connection, a text message goes into the offline queue and shows as "waiting" until it's sent.
+   */
   const submit = async (media?: Media) => {
-    const body = text.trim();
-    if (sending || (!body && !media)) return;
+    const withText = media?.kind !== "audio";
+    const body = withText ? text.trim() : "";
+    if (sendingRef.current || (!body && !media)) return;
+    sendingRef.current = true;
     setSending(true);
-    let queued = false;
-    // Allocate the dedup tag before the first attempt so a retry after a lost
-    // response can never post a second copy (M2).
+    // The tag is made before the first attempt, so a retry can never post a second copy.
     const clientTag = newClientTag();
-    const userId = me.data?.profile?.userId ?? null;
-    try {
-      try {
-        tellIfHeld(editing ? await api.editMessage(roomId, editing.id, body) : await api.send({ roomId, body, replyTo: replyTo?.id ?? null, media, clientTag }));
-      } catch (error) {
-        // Queue ONLY transient network failures. Validation, moderation,
-        // permission and auth errors are permanent — retrying them is wrong (M2).
-        const isNetworkError = error instanceof Error && (error as { status?: number }).status === 0;
-        if (!editing && !media && isNetworkError && userId) {
-          await enqueueMessage(userId, { roomId, body, replyTo: replyTo?.id ?? null, clientTag });
-          queued = true;
-          // Clear the composer: the words are safe in the queue now.
-          setText("");
-          setReplyTo(null);
-          showError(error, "No connection — it will send when you're back online");
-        } else {
-          showError(error, "Message not sent");
-        }
-        throw error;
-      }
-      setText("");
+    const input = { roomId, body, replyTo: replyTo?.id ?? null, clientTag };
+    const clearComposer = () => {
+      if (withText) setText("");
       setReplyTo(null);
       setEditing(null);
       typingSent.current = 0;
-      await refresh();
-    } catch {
-      if (queued) return; // already reported with the offline explanation
-      showError(new Error("Message not sent"), "Message not sent");
+    };
+    try {
+      // Keep the order: while earlier messages for this room are waiting, a new one waits behind them.
+      if (!editing && !media && myId && pending.some((p) => !p.failed)) {
+        await enqueueMessage(myId, input);
+        clearComposer();
+        flushNow();
+        return;
+      }
+      try {
+        tellIfHeld(editing ? await api.editMessage(roomId, editing.id, body) : await api.send({ ...input, media }));
+        clearComposer();
+        await refresh();
+      } catch (error) {
+        // Only "no connection" is queued. A refusal (blocked, removed, rejected words) is shown instead.
+        const offline = (error as { status?: number }).status === 0;
+        if (offline && !editing && !media && myId) {
+          await enqueueMessage(myId, input);
+          clearComposer();
+          return;
+        }
+        showError(error, editing ? "Edit not saved" : media ? "Couldn't send that" : "Message not sent");
+      }
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
+  // The voice recorder's 45-second auto-stop calls the latest `submit`, not the one from when recording began.
+  const submitRef = useRef(submit);
+  useEffect(() => {
+    submitRef.current = submit;
+  });
 
   const sendSticker = async (id: string) => {
     setSheet(null);
     if (sending) return;
     setSending(true);
     try {
-      await api.send({ roomId, body: stickerToken(id), replyTo: replyTo?.id ?? null });
+      await api.send({ roomId, body: stickerToken(id), replyTo: replyTo?.id ?? null, clientTag: newClientTag() });
       setReplyTo(null);
       await refresh();
     } catch (error) {
@@ -179,7 +263,7 @@ export default function ChatRoom() {
         if (dataUrl) await submit({ kind: "audio", dataUrl });
       } else {
         await voice.start((dataUrl) => {
-          if (dataUrl) void submit({ kind: "audio", dataUrl });
+          if (dataUrl) void submitRef.current({ kind: "audio", dataUrl });
         });
       }
     } catch (error) {
@@ -268,7 +352,9 @@ export default function ChatRoom() {
         : [extra?.communityName, room.data.participants.length ? `${room.data.participants.length} people` : null].filter(Boolean).join(" · ") || undefined;
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    // "padding" on Android too: apps are edge-to-edge there now, so the window no longer shrinks for the keyboard
+    // by itself and the input bar would sit behind it.
+    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior="padding">
       <ChatHeader
         person={roomPerson(info)}
         title={title}
@@ -359,7 +445,25 @@ export default function ChatRoom() {
             </View>
           );
         }}
-        ListHeaderComponent={typingNames.length ? <TypingBubble names={typingNames} /> : null}
+        ListHeaderComponent={
+          pending.length || typingNames.length ? (
+            <View>
+              {typingNames.length ? <TypingBubble names={typingNames} /> : null}
+              {[...pending].reverse().map((entry) => (
+                <PendingBubble key={entry.clientTag} entry={entry} onPress={() => managePending(entry)} />
+              ))}
+            </View>
+          ) : null
+        }
+        onEndReached={() => void loadOlder()}
+        onEndReachedThreshold={0.3}
+        ListFooterComponent={
+          olderState === "loading" ? (
+            <View style={{ padding: 12 }}>
+              <ActivityIndicator color={theme.violet} />
+            </View>
+          ) : null
+        }
         contentContainerStyle={{ paddingVertical: 10, flexGrow: 1 }}
         ListEmptyComponent={
           <View style={{ flex: 1, justifyContent: "center", padding: 24 }}>
@@ -412,7 +516,8 @@ export default function ChatRoom() {
             {mineSelected && !selected.mediaKind ? (
               <OptionRow icon="create-outline" title="Edit" onPress={() => { setEditing(selected); setReplyTo(null); setText(selected.body); setSelected(null); }} right={null} />
             ) : null}
-            <OptionRow icon="trash-outline" title="Delete" onPress={() => remove(selected)} right={null} />
+            {/* Others' messages can only be removed by community or group moderators (never in a DM). */}
+            {mineSelected || !isDm ? <OptionRow icon="trash-outline" title="Delete" onPress={() => remove(selected)} right={null} /> : null}
             {mineSelected ? null : (
               <OptionRow
                 icon="flag-outline"
@@ -439,6 +544,40 @@ export default function ChatRoom() {
       <RoomSettings visible={sheet === "settings"} onClose={() => setSheet(null)} page={room.data} myId={myId} onChanged={() => void refresh()} />
       <ReportSheet target={report} onClose={() => setReport(null)} />
     </KeyboardAvoidingView>
+  );
+}
+
+/** A message of yours that hasn't reached the server yet ("Waiting to send"), or that the server refused. */
+function PendingBubble({ entry, onPress }: { entry: QueuedMessage; onPress: () => void }) {
+  const theme = useTheme();
+  return (
+    <View style={{ alignItems: "flex-end", paddingHorizontal: 12, paddingVertical: 3 }}>
+      <PressableScale
+        onPress={onPress}
+        accessibilityRole="button"
+        accessibilityLabel={`${previewText(entry.input.body)}. ${entry.failed ? "Not sent" : "Waiting to send"}. Tap for options.`}
+        scaleTo={0.98}
+        style={{
+          maxWidth: "76%",
+          paddingHorizontal: 13,
+          paddingVertical: 9,
+          borderRadius: 18,
+          borderBottomRightRadius: 6,
+          backgroundColor: theme.surfaceAlt,
+          borderWidth: 1,
+          borderStyle: "dashed",
+          borderColor: entry.failed ? theme.danger : theme.border,
+        }}
+      >
+        <Txt style={{ fontFamily: font.regular, fontSize: 14.5, lineHeight: 20, color: theme.ink }}>{previewText(entry.input.body)}</Txt>
+      </PressableScale>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 4, paddingTop: 2 }}>
+        <Ionicons name={entry.failed ? "alert-circle" : "time-outline"} size={13} color={entry.failed ? theme.danger : theme.subtle} />
+        <Txt style={{ fontFamily: font.semibold, fontSize: 11, lineHeight: 14, color: entry.failed ? theme.danger : theme.subtle }}>
+          {entry.failed ? "Not sent · tap for options" : "Waiting to send"}
+        </Txt>
+      </View>
+    </View>
   );
 }
 
