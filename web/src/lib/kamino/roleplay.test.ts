@@ -25,9 +25,9 @@ test("a scene needs a title, a premise and at least one character; duplicates an
   assert.equal(checked.characters.length, 8);
 });
 
-test("the storyteller is told to stay teen-safe and to write original prose only", () => {
+test("the storyteller is told the 18+ audience, the content limits, and to write original prose only", () => {
   const rules = storytellerRules();
-  assert.match(rules, /13/);
+  assert.match(rules, /18\+/);
   assert.match(rules, /no sexual content/);
   assert.match(rules, /ORIGINAL prose/);
   assert.match(rules, /Never copy lines, lyrics/);

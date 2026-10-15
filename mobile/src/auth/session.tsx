@@ -4,12 +4,13 @@ import { authRequest, rpc, setAuthToken, setUnauthorizedHandler } from "@/api/cl
 import {apiBaseUrl} from '@/api/config';
 import * as WebBrowser from 'expo-web-browser';
 import { api } from "@/api/endpoints";
+import { YOUNG_MESSAGE } from "@/lib/age";
 import { deleteSecret, readSecret, writeSecret } from "./storage";
 import { unregisterPushDevice } from "@/lib/push";
 
 const TOKEN_KEY = "kamino.session-token";
 
-/** `needsAge`: signed in, but has not passed the 13+ birthday check yet. */
+/** `needsAge`: signed in, but has not passed the 18+ birthday check yet. */
 type Status = "loading" | "signedOut" | "needsAge" | "signedIn";
 
 export type Birthday = { year: number; month: number; day: number };
@@ -113,7 +114,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const answer = await api.confirmAge(birthday);
         if (!answer.ok) {
           await clearLocal(); // the server has already erased the account
-          throw new Error("Kamino is for people aged 13 and over, so we can't create an account for you.");
+          throw new Error(YOUNG_MESSAGE);
         }
         await finishSignIn(token);
       },

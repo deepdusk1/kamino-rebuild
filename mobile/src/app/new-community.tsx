@@ -270,8 +270,8 @@ export default function NewCommunityWizard() {
         description: tagline.trim(),
         category,
         visibility: visibilityValue,
-        // The server sets the age gate itself; 18 is sent when the mature box is ticked.
-        ageGate: isMature18Plus ? 18 : 13,
+        // Kamino is 18+ only, so every community is 18+ (the server enforces this too).
+        ageGate: 18,
         rules: rules.map((r, n) => `${n + 1}. ${r}`).join("\n"),
       });
       const createdSlug = created.id;

@@ -28,7 +28,7 @@ function SafetyPage() {
         </section>
 
         <Card icon={<Scale />} tone="violet" title="House rules">
-          Free to use, and nothing can buy you reputation or power. Kamino is for people aged 13 and up. No sexual content involving
+          Free to use, and nothing can buy you reputation or power. Kamino is for adults aged 18 and over. No sexual content involving
           minors, no selling drugs, weapons or stolen goods, no threats, no hate, no scams.
         </Card>
         <Card icon={<Bot />} tone="blue" title="How moderation works">

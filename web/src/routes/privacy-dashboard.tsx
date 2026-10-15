@@ -9,7 +9,7 @@ import { fieldClass } from '@/components/community/sheet';
 import { useCurrentUserState } from '@/lib/auth/use-current-user';
 import { RedirectToSignIn } from '@/lib/auth/gates';
 import { getIdentityDashboard, updateIdentityPreferences, setPersonRelationship, findContacts } from '@/lib/kamino/identity-v9';
-import { BirthdayFields, EMPTY_BIRTHDAY, judgeBirthday } from '@/components/birthday-fields';
+import { BirthdayFields, EMPTY_BIRTHDAY, judgeBirthday, YOUNG_MESSAGE } from '@/components/birthday-fields';
 import { confirmMinimumAge } from '@/lib/kamino/extras';
 import { useT, LOCALES, writeLocaleCookie } from '@/lib/i18n';
 
@@ -63,7 +63,7 @@ function PrivacyDashboard() {
       <section className={card}><h2 className="flex items-center gap-2 text-xl font-bold"><Shield size={20}/> Age and teen safety</h2>
         <p>{d.ageChecked ? `Checked eligibility: ${d.ageBand}. Eligibility updates as you reach the relevant age.` : 'Confirm your birthday once to establish age eligibility. Earlier settings checkboxes cannot unlock age-gated communities.'}</p>
         <p className="text-sm text-muted">Teen accounts can message mutual follows only. They have daily limits and cannot show sensitive content without a warning.</p>
-        {!d.ageChecked && <><BirthdayFields value={birthday} onChange={setBirthday}/><GradientButton onClick={async () => {const verdict=judgeBirthday(birthday);if(verdict.kind!=='ok') return toast.error('Enter a valid birthday, age 13 or older.');try{await confirmMinimumAge({data:{year:verdict.year,month:verdict.month,day:verdict.day}});await dashboard.refetch();}catch(e){toast.error(String(e));}}}>Confirm eligibility</GradientButton></>}
+        {!d.ageChecked && <><BirthdayFields value={birthday} onChange={setBirthday}/><GradientButton onClick={async () => {const verdict=judgeBirthday(birthday);if(verdict.kind!=='ok') return toast.error(verdict.kind==='young'?YOUNG_MESSAGE:'Enter your real birthday: month, day and a four-digit year.');try{await confirmMinimumAge({data:{year:verdict.year,month:verdict.month,day:verdict.day}});await dashboard.refetch();}catch(e){toast.error(String(e));}}}>Confirm eligibility</GradientButton></>}
       </section>
       <section className={card}><h2 className="flex items-center gap-2 text-xl font-bold"><Users size={20}/> Your people</h2>
         <div className="flex flex-wrap gap-2"><input className={`${fieldClass} min-w-40 flex-1`} value={target} onChange={e => setTarget(e.target.value)} placeholder="@username" aria-label="Member username"/><select className={fieldClass} value={relationship} onChange={e => setRelationship(e.target.value as typeof relationship)}><option value="favorite">Favorite</option><option value="close_friend">Close friend</option><option value="restrict">Restrict messages</option><option value="mute">Mute</option></select><GradientButton onClick={() => void changePerson(target,relationship,true)}>Add</GradientButton></div>

@@ -502,7 +502,12 @@ export const deleteMyAccount = createServerFn({ method: "POST" })
  */
 export const confirmMinimumAge = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { year: number; month: number; day: number }) => d)
+  // Coerce to whole numbers: a phone that sends "2001" must not turn `year + 18` into the string "200118".
+  .validator((d: { year: number; month: number; day: number }) => ({
+    year: Math.trunc(Number(d?.year)),
+    month: Math.trunc(Number(d?.month)),
+    day: Math.trunc(Number(d?.day)),
+  }))
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;

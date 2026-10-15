@@ -16,7 +16,7 @@ export const api = {
   discover: () => rpc<M.Discover>("listDiscover"),
   search: (q: string) => rpc<M.SearchResults>("searchAll", q),
   checkIn: () => rpc<M.CheckIn>("checkIn"),
-  /** The 13+ birthday check. The date is compared once on the server and never saved. */
+  /** The 18+ birthday check (`confirmMinimumAge` in web/src/lib/kamino/extras.ts). Under 18 erases the account. */
   confirmAge: (input: { year: number; month: number; day: number }) => rpc<{ ok: boolean }>("confirmMinimumAge", input),
 
   // ── Communities ──────────────────────────────────────────────────────────

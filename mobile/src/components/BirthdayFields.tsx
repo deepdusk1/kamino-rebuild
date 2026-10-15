@@ -1,12 +1,12 @@
 import { View } from "react-native";
-import { checkBirthDate, MINIMUM_AGE } from "@/lib/age";
+import { checkBirthDate, MINIMUM_AGE, YOUNG_MESSAGE } from "@/lib/age";
 import { Field, Txt } from "@/components/ui";
 import { font, space, useTheme } from "@/theme";
 
 export type Birthday = { month: string; day: string; year: string };
 export const EMPTY_BIRTHDAY: Birthday = { month: "", day: "", year: "" };
 
-export const YOUNG_MESSAGE = `Kamino is for people aged ${MINIMUM_AGE} and over, so we can't create an account for you. We don't keep the date you entered.`;
+export { YOUNG_MESSAGE };
 
 /** Turns what was typed into a verdict the sign-up and age screens can act on. */
 export function judgeBirthday(b: Birthday): { kind: "ok"; year: number; month: number; day: number } | { kind: "young" } | { kind: "invalid"; message: string } {
