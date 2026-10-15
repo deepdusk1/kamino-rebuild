@@ -151,7 +151,8 @@ export const api = {
    * never flips a stale state. Prefer `setFollow` in src/lib/follow.ts, which also updates every screen's cache.
    */
   setFollow: (targetId: string, follow: boolean) => rpc<M.FollowResult>("setFollowProfile", { targetId, follow }),
-  block: (targetId: string) => rpc<unknown>("blockUser", targetId),
+  /** Block (true) or unblock (false). Safe to repeat; blocking also ends follows both ways. */
+  setBlocked: (targetId: string, blocked: boolean) => rpc<{ blocked: boolean }>("setBlockedUser", { targetId, blocked }),
   addWallPost: (handle: string, body: string) => rpc<{ ok: boolean; held: boolean }>("addWallPost", { handle, body }),
   /** Your own picture as your profile's wall cover. */
   setProfileCover: (dataUrl: string) => rpc<{ cover: string }>("setProfileCover", { dataUrl }),

@@ -43,7 +43,7 @@ import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { BUBBLE_STYLE_LABELS } from "@/lib/kamino/cosmetics";
 import { deleteMyAccount } from "@/lib/kamino/extras";
 import { importMyData } from "@/lib/kamino/library";
-import { blockUser, exportMyData, getMe, updateSettings } from "@/lib/kamino/server";
+import { exportMyData, getMe, setBlockedUser, updateSettings } from "@/lib/kamino/server";
 import { applyThemeChoice, getThemeChoice, setThemeChoice, type ThemeChoice } from "@/lib/theme";
 import { PROFILE_COVERS } from "@/lib/kamino/titles";
 import {
@@ -364,7 +364,7 @@ function SettingsCards({ me, save, email }: { me: Me; save: (patch: Patch) => Pr
               type="button"
               className="k-focus k-hit relative h-8 rounded-full border border-border bg-surface px-3.5 text-[13px] font-bold text-violet hover:bg-surface-alt"
               onClick={() =>
-                void blockUser({ data: b.blocked_id }).then(() => queryClient.invalidateQueries({ queryKey: ["me"] }), fail)
+                void setBlockedUser({ data: { targetId: b.blocked_id, blocked: false } }).then(() => queryClient.invalidateQueries({ queryKey: ["me"] }), fail)
               }
             >
               Unblock

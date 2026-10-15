@@ -2,9 +2,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Constants from "expo-constants";
 import * as DocumentPicker from "expo-document-picker";
-import { readAsStringAsync } from "expo-file-system/legacy";
+import { cacheDirectory, readAsStringAsync, writeAsStringAsync } from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { router } from "expo-router";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Alert, Linking, Share, Switch, View } from "react-native";
 import { SUPPORT_EMAIL } from "@/api/config";
 import { api } from "@/api/endpoints";
@@ -16,6 +17,9 @@ import { hourLabel } from "@/components/profile/helpers";
 import { Button, ErrorState, Field, Loading, PressableScale, Screen, Sheet, Txt } from "@/components/ui";
 import { errorMessage, useAction } from "@/lib/errors";
 import { haptic } from "@/lib/haptics";
+import { loadColorScheme, saveColorScheme, type ColorSchemeChoice } from "@/lib/appearance";
+import { identityApi, type IdentityDashboard, type IdentityPreferences } from "@/lib/identity-v9";
+import { TEXT_SIZE_LABEL, deviceTimeZone, exportFileName, quietLength, timeZoneToSave } from "@/lib/settings-rules";
 import { font, radius, shadow, useTheme, type Tone } from "@/theme";
 
 type IconName = keyof typeof Ionicons.glyphMap;
@@ -25,6 +29,12 @@ const NOTIFY_CATEGORIES: readonly { key: Exclude<keyof NotifyPrefs, "digest">; l
   { key: "community", label: "Communities", hint: "Invites, announcements, achievements", icon: "people", tone: "blue" },
   { key: "events", label: "Events & live", hint: "Event reminders, live rooms, calls", icon: "calendar", tone: "orange" },
   { key: "messages", label: "Messages", hint: "New messages in your chats", icon: "chatbubble-ellipses", tone: "violet" },
+];
+
+const SCHEME_OPTIONS: readonly { value: ColorSchemeChoice; label: string }[] = [
+  { value: "system", label: "Same as phone" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
 ];
 
 const DM_OPTIONS: readonly { value: DmPrivacy; label: string }[] = [
@@ -45,6 +55,8 @@ export default function Settings() {
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const role = useQuery({ queryKey: ["safetyRole"], queryFn: api.safetyRole, staleTime: 10 * 60_000 });
 
+  const identity = useQuery({ queryKey: ["identityDashboard"], queryFn: identityApi.dashboard });
+  const scheme = useQuery({ queryKey: ["colorScheme"], queryFn: loadColorScheme, staleTime: Infinity });
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [pushNote, setPushNote] = useState<string | null>(null);
@@ -63,8 +75,44 @@ export default function Settings() {
       notify("Couldn't save that", errorMessage(error));
     }
     await queryClient.invalidateQueries({ queryKey: ["me"] });
+    void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
     void queryClient.invalidateQueries({ queryKey: ["profileOverview"] });
   };
+
+  /**
+   * Quiet hours are checked on the server in your profile's time zone, so the phone's zone is saved with them (they
+   * used to run in UTC: 10 pm–7 am in Kelowna became 3 pm–midnight).
+   */
+  const saveQuiet = (quietStart: number | null, quietEnd: number | null) => {
+    const timezone = timeZoneToSave(me.data?.profile.timezone, deviceTimeZone());
+    void save({ quietStart, quietEnd, ...(timezone ? { timezone } : {}) });
+  };
+
+  /** Text size and contrast live on the account (so they follow you to new phones). Saved straight away on screen. */
+  const savePreference = async (patch: Partial<IdentityPreferences>) => {
+    queryClient.setQueryData<IdentityDashboard>(["identityDashboard"], (prev) => (prev ? { ...prev, preferences: { ...prev.preferences, ...patch } } : prev));
+    try {
+      await identityApi.preferences(patch);
+      haptic.tap();
+    } catch (error) {
+      notify("Couldn't save that", errorMessage(error));
+    }
+    await queryClient.invalidateQueries({ queryKey: ["identityDashboard"] });
+  };
+
+  const pickScheme = async (choice: ColorSchemeChoice) => {
+    queryClient.setQueryData(["colorScheme"], choice);
+    await saveColorScheme(choice);
+    haptic.tap();
+  };
+
+  // Keeps the account's time zone in step with this phone while Settings is open (quiet hours depend on it).
+  const savedZone = me.data?.profile.timezone;
+  useEffect(() => {
+    if (savedZone === undefined) return;
+    const timezone = timeZoneToSave(savedZone, deviceTimeZone());
+    if (timezone) api.updateSettings({ timezone }).catch(() => undefined);
+  }, [savedZone]);
 
   const [checkPush, checkingPush] = useAction(async () => {
     const { registerPushDevice } = await import("@/lib/push");
@@ -78,10 +126,24 @@ export default function Settings() {
     );
   });
 
-  const [exportData, exporting] = useAction(async () => {
-    const { json } = await api.exportData();
-    await Share.share({ message: json, title: "My Kamino data" });
-  });
+  /**
+   * Saves the export as a .json file and opens the share sheet for it. (Sharing it as message text crashed on Android
+   * once the export passed about 1 MB, which pictures quickly do.)
+   */
+  const [exportData, exporting] = useAction(
+    async () => {
+      const { json } = await api.exportData();
+      if (cacheDirectory && (await Sharing.isAvailableAsync())) {
+        const uri = `${cacheDirectory}${exportFileName(new Date())}`;
+        await writeAsStringAsync(uri, json);
+        await Sharing.shareAsync(uri, { mimeType: "application/json", dialogTitle: "Save your Kamino data", UTI: "public.json" });
+        return;
+      }
+      if (json.length > 500_000) throw new Error("Your export is too large to share from here. Download it from Settings on the Kamino website instead.");
+      await Share.share({ message: json, title: "My Kamino data" });
+    },
+    { errorTitle: "Couldn't export your data" },
+  );
 
   const [importData, importing] = useAction(
     async () => {
@@ -106,12 +168,20 @@ export default function Settings() {
     await signOut();
   });
 
-  const unblock = async (userId: string) => {
+  const [unblocking, setUnblocking] = useState<string | null>(null);
+  const unblock = async (person: { blocked_id: string; display_name: string }) => {
+    const ok = await confirmAction(`Unblock ${person.display_name}?`, "They'll be able to see your posts and message you again. They won't be told.", "Unblock");
+    if (!ok) return;
+    setUnblocking(person.blocked_id);
     try {
-      await api.block(userId);
+      // Says "unblock" (not "flip"), so tapping twice can never block them again.
+      await api.setBlocked(person.blocked_id, false);
       await queryClient.invalidateQueries({ queryKey: ["me"] });
+      void queryClient.invalidateQueries({ queryKey: ["profileOverview"] });
     } catch (error) {
       notify("Couldn't unblock", errorMessage(error));
+    } finally {
+      setUnblocking(null);
     }
   };
 
@@ -122,12 +192,15 @@ export default function Settings() {
   // Older accounts may be missing a key; anything missing counts as on (digest as off).
   const prefs: NotifyPrefs = { ...{ social: true, community: true, events: true, messages: true, digest: false }, ...(p.notifyPrefs as Partial<NotifyPrefs>) };
   const quietOn = p.quietStart !== null && p.quietEnd !== null;
+  const quietStart = p.quietStart ?? 22;
+  const quietEnd = p.quietEnd ?? 7;
+  const look = identity.data?.preferences;
 
   return (
     <Screen>
       <Section title="Account" icon="person" tone="violet">
         <LinkRow icon="create-outline" label="Edit profile" detail="Name, photo, bio, cover" onPress={() => router.push("/edit-profile")} />
-        <LinkRow icon="finger-print-outline" label="Username, language & accessibility" detail="Handle, app language, text size, contrast" onPress={() => router.push("/privacy-dashboard" as never)} />
+        <LinkRow icon="finger-print-outline" label="Username, language & links" detail="Your @handle, app language and profile links" onPress={() => router.push("/privacy-dashboard" as never)} />
         <LinkRow icon="shield-outline" label="Security" detail="Password, two-step sign-in, signed-in devices" onPress={() => router.push("/security")} />
       </Section>
 
@@ -157,22 +230,50 @@ export default function Settings() {
             })}
           </View>
         </View>
+        <LinkRow icon="eye-off-outline" label="More privacy" detail="Search visibility, follower lists, mentions, invites, sensitive content" onPress={() => router.push("/privacy-dashboard" as never)} />
       </Section>
 
       <Section title="Notifications" icon="notifications" tone="orange">
+        <Txt style={{ fontFamily: font.regular, fontSize: 12, lineHeight: 16, color: theme.muted }}>These switch phone alerts. Everything still shows in your notifications list.</Txt>
         {NOTIFY_CATEGORIES.map((c) => (
           <SwitchRow key={c.key} label={c.label} hint={c.hint} icon={c.icon} tone={c.tone} value={prefs[c.key]} onChange={(value) => void save({ notifyPrefs: { [c.key]: value } })} />
         ))}
         <SwitchRow label="Weekly email digest" hint="What you missed across your communities." icon="mail" tone="green" value={prefs.digest} onChange={(digest) => void save({ notifyPrefs: { digest } })} />
         <SwitchRow
           label="Quiet hours"
-          hint={quietOn ? `No phone alerts from ${hourLabel(p.quietStart ?? 22)} to ${hourLabel(p.quietEnd ?? 7)}` : "Pause phone alerts overnight (10 pm to 7 am)"}
+          hint={
+            quietOn
+              ? `No phone alerts from ${hourLabel(quietStart)} to ${hourLabel(quietEnd)} (${quietLength(quietStart, quietEnd)} hours). Your notifications list still fills.`
+              : "Pause phone alerts overnight"
+          }
           icon="moon"
           tone="blue"
           value={quietOn}
-          onChange={(on) => void save({ quietStart: on ? 22 : null, quietEnd: on ? 7 : null })}
+          onChange={(on) => saveQuiet(on ? quietStart : null, on ? quietEnd : null)}
         />
+        {quietOn ? (
+          <View style={{ gap: 6, paddingLeft: 44 }}>
+            <HourStepper label="From" value={quietStart} onChange={(h) => (h === quietEnd ? undefined : saveQuiet(h, quietEnd))} />
+            <HourStepper label="Until" value={quietEnd} onChange={(h) => (h === quietStart ? undefined : saveQuiet(quietStart, h))} />
+          </View>
+        ) : null}
         <LinkRow icon="refresh-outline" label="Check push notifications" detail={pushNote ?? "Re-register this phone if alerts stopped"} busy={checkingPush} onPress={() => void checkPush()} />
+      </Section>
+
+      <Section title="Appearance" icon="color-palette" tone="pink">
+        <View style={{ gap: 8 }}>
+          <Txt style={{ fontFamily: font.semibold, fontSize: 14, color: theme.ink }}>Theme</Txt>
+          <ChoiceRow options={SCHEME_OPTIONS} value={scheme.data ?? "system"} onPick={(v) => void pickScheme(v)} />
+        </View>
+        <View style={{ gap: 8 }}>
+          <Txt style={{ fontFamily: font.semibold, fontSize: 14, color: theme.ink }}>Text size</Txt>
+          <ChoiceRow
+            options={(["standard", "large", "largest"] as const).map((v) => ({ value: v, label: TEXT_SIZE_LABEL[v]! }))}
+            value={look?.textScale ?? "standard"}
+            onPick={(textScale) => void savePreference({ textScale })}
+          />
+        </View>
+        <SwitchRow label="High contrast" hint="Stronger text and borders, plain backgrounds." value={look?.highContrast ?? false} onChange={(highContrast) => void savePreference({ highContrast })} />
       </Section>
 
       <Section title="Safety" icon="shield-checkmark" tone="green">
@@ -183,11 +284,11 @@ export default function Settings() {
             <Txt style={{ fontFamily: font.semibold, fontSize: 14, color: theme.ink }}>Blocked people</Txt>
             {me.data.blocked.map((b) => (
               <View key={b.blocked_id} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-                <PersonAvatar person={{ name: b.display_name, hue: 260 }} size={34} />
+                <PersonAvatar person={{ name: b.display_name, hue: 260, userId: b.blocked_id }} size={34} />
                 <Txt numberOfLines={1} style={{ flex: 1, fontFamily: font.semibold, fontSize: 14, color: theme.ink }}>
                   {b.display_name} <Txt style={{ color: theme.subtle }}>@{b.handle}</Txt>
                 </Txt>
-                <Button label="Unblock" small variant="secondary" onPress={() => void unblock(b.blocked_id)} />
+                <Button label="Unblock" small variant="secondary" busy={unblocking === b.blocked_id} onPress={() => void unblock(b)} />
               </View>
             ))}
           </View>
@@ -220,8 +321,16 @@ export default function Settings() {
         Kamino {Constants.expoConfig?.version ?? "1.0.0"}
       </Txt>
 
-      <Sheet visible={deleteOpen} title="Delete account" onClose={() => setDeleteOpen(false)}>
-        <Txt tone="muted">This permanently deletes your profile, posts, messages and memberships. It can&apos;t be undone.</Txt>
+      <Sheet
+        visible={deleteOpen}
+        title="Delete account"
+        onClose={() => {
+          setDeleteOpen(false);
+          setConfirmText("");
+        }}
+      >
+        <Txt tone="muted">This permanently deletes your profile, posts, messages and memberships. It can&apos;t be undone. Communities you own are handed to a co-leader (or your most active member).</Txt>
+        <Txt tone="muted">Want a copy first? Use Export my data before deleting.</Txt>
         <Field label="Type DELETE to confirm" value={confirmText} onChangeText={setConfirmText} autoCapitalize="characters" autoCorrect={false} />
         <Button label="Delete forever" variant="danger" onPress={() => void deleteAccount()} busy={deleting} disabled={confirmText.trim() !== "DELETE"} />
       </Sheet>
@@ -279,5 +388,49 @@ function LinkRow({ icon, label, detail, onPress, busy }: { icon: IconName; label
       </View>
       <Ionicons name="chevron-forward" size={16} color={theme.subtle} />
     </PressableScale>
+  );
+}
+
+/** A row of pill choices (one selected). */
+function ChoiceRow<T extends string>({ options, value, onPick }: { options: readonly { value: T; label: string }[]; value: string; onPick: (v: T) => void }) {
+  const theme = useTheme();
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+      {options.map((opt) => {
+        const on = value === opt.value;
+        return (
+          <PressableScale
+            key={opt.value}
+            onPress={() => onPick(opt.value)}
+            accessibilityRole="radio"
+            accessibilityState={{ checked: on }}
+            accessibilityLabel={opt.label}
+            scaleTo={0.96}
+            style={{ height: 32, paddingHorizontal: 12, borderRadius: radius.pill, borderWidth: 1, justifyContent: "center", backgroundColor: on ? theme.tints.violet : theme.surfaceAlt, borderColor: on ? theme.violet : theme.border }}
+          >
+            <Txt style={{ fontFamily: on ? font.bold : font.semibold, fontSize: 12.5, color: on ? theme.toneText.violet : theme.muted }}>{opt.label}</Txt>
+          </PressableScale>
+        );
+      })}
+    </View>
+  );
+}
+
+/** "From  ‹ 10 PM ›": one hour earlier or later per tap. */
+function HourStepper({ label, value, onChange }: { label: string; value: number; onChange: (hour: number) => void }) {
+  const theme = useTheme();
+  const step = (by: number) => onChange((((value + by) % 24) + 24) % 24);
+  const button = (icon: IconName, by: number, a11y: string) => (
+    <PressableScale onPress={() => step(by)} accessibilityRole="button" accessibilityLabel={a11y} hitSlop={8} scaleTo={0.9} style={{ width: 36, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: theme.surfaceAlt }}>
+      <Ionicons name={icon} size={16} color={theme.ink} />
+    </PressableScale>
+  );
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }} accessibilityLabel={`${label} ${hourLabel(value)}`}>
+      <Txt style={{ width: 48, fontFamily: font.semibold, fontSize: 13.5, color: theme.muted }}>{label}</Txt>
+      {button("chevron-back", -1, `${label} one hour earlier`)}
+      <Txt style={{ minWidth: 64, textAlign: "center", fontFamily: font.bold, fontSize: 14, color: theme.ink }}>{hourLabel(value)}</Txt>
+      {button("chevron-forward", 1, `${label} one hour later`)}
+    </View>
   );
 }

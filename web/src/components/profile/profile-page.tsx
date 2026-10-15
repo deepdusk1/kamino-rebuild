@@ -51,7 +51,7 @@ import {
 import { signOut } from "@/lib/auth/client";
 import { defaultCover } from "@/lib/brand-art";
 import {
-  blockUser,
+  setBlockedUser,
   getPublicProfile,
   joinCommunity,
   openDm,
@@ -258,7 +258,7 @@ export function ProfilePage({
       action: d.blocked ? "Unblock" : "Block",
       destructive: !d.blocked,
       run: async () => {
-        await blockUser({ data: p.userId });
+        await setBlockedUser({ data: { targetId: p.userId, blocked: !d.blocked } });
         await queryClient.invalidateQueries();
       },
     });

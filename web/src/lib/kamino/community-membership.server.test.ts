@@ -9,8 +9,10 @@ import {
   checkInvite,
   communityLeaderIds,
   followStateOf,
+  handOverOwnedCommunities,
   leaveMembership,
   restoreMember,
+  setBlock,
   setProfileFollow,
   useInvite,
 } from "./community-membership.server.ts";
@@ -183,4 +185,61 @@ test("the cleanup migration left banned and waiting members without staff roles"
   await pg.exec(readFileSync(new URL("0053_community_integrity.sql", migrations), "utf8"));
   assert.equal((await statusOf("eve", "leaders"))?.role, "member");
   assert.equal(await count("leaders"), 3, "member counts are recounted from active memberships");
+});
+
+// ── Settings: blocking and account deletion ─────────────────────────────────
+
+test("block is set, not toggled, and ends follows and requests both ways", async () => {
+  await person("gus");
+  await person("hana", true);
+  await setProfileFollow(sql, "gus", "dev", true);
+  await setProfileFollow(sql, "dev", "gus", true);
+  await setProfileFollow(sql, "gus", "hana", true); // a request (private account)
+  assert.deepEqual(await setBlock(sql, "gus", "dev", true), { blocked: true });
+  assert.deepEqual(await setBlock(sql, "gus", "dev", true), { blocked: true }, "blocking twice stays blocked");
+  assert.deepEqual(await followStateOf(sql, "gus", "dev"), { following: false, requested: false });
+  assert.deepEqual(await followStateOf(sql, "dev", "gus"), { following: false, requested: false });
+  await setBlock(sql, "hana", "gus", true);
+  assert.deepEqual(await followStateOf(sql, "gus", "hana"), { following: false, requested: false }, "the waiting request is gone");
+  // A stale "Unblock" pressed twice must not block again (the old toggle did).
+  assert.deepEqual(await setBlock(sql, "gus", "dev", false), { blocked: false });
+  assert.deepEqual(await setBlock(sql, "gus", "dev", false), { blocked: false });
+  assert.equal((await sql`select 1 from blocks where blocker_id = 'gus' and blocked_id = 'dev'`).length, 0);
+  await assert.rejects(setBlock(sql, "gus", "gus", true), /yourself/);
+});
+
+test("an owner's communities get a new owner when their account is deleted", async () => {
+  await community("handover");
+  await member("owner2", "handover", "agent");
+  await member("m1", "handover", "member");
+  await member("c1", "handover", "curator");
+  await member("l1", "handover", "leader");
+  await sql`update memberships set rep = 999 where user_id = 'm1' and community_id = 'handover'`;
+  await community("alone");
+  await member("owner2", "alone", "agent");
+  assert.equal(await handOverOwnedCommunities(sql, "owner2"), 1);
+  assert.equal((await statusOf("l1", "handover"))?.role, "agent", "a co-leader comes first, even over a busier member");
+  assert.equal((await sql<{ created_by: string }>`select created_by from communities where id = 'handover'`)[0]!.created_by, "l1");
+  assert.equal((await statusOf("owner2", "alone"))?.role, "agent", "nobody else to hand an empty community to");
+});
+
+test("without a co-leader, a curator and then the most active member take over", async () => {
+  await community("handover2");
+  await member("owner3", "handover2", "agent");
+  await member("m2", "handover2", "member");
+  await member("m3", "handover2", "member");
+  await sql`update memberships set rep = 50 where user_id = 'm3' and community_id = 'handover2'`;
+  await handOverOwnedCommunities(sql, "owner3");
+  assert.equal((await statusOf("m3", "handover2"))?.role, "agent");
+});
+
+test("the settings repair migration fixes values older code left behind", async () => {
+  await person("ivy");
+  await sql`update profiles set restricted_mode = true, quiet_start = 22, quiet_end = null, dm_privacy = 'whatever' where user_id = 'ivy'`;
+  await sql`insert into profile_follows (follower_id, followee_id) values ('ivy', 'ana')`;
+  await sql`insert into blocks (blocker_id, blocked_id) values ('ana', 'ivy')`;
+  await pg.exec(readFileSync(new URL("0055_settings_fixes.sql", migrations), "utf8"));
+  const row = (await sql<{ restricted_mode: boolean; quiet_start: number | null; dm_privacy: string }>`select restricted_mode, quiet_start, dm_privacy from profiles where user_id = 'ivy'`)[0]!;
+  assert.deepEqual([row.restricted_mode, row.quiet_start, row.dm_privacy], [false, null, "members"]);
+  assert.deepEqual(await followStateOf(sql, "ivy", "ana"), { following: false, requested: false });
 });

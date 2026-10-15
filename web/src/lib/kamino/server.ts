@@ -2144,21 +2144,29 @@ export const followMember = createServerFn({ method: "POST" })
       : setProfileFollow(sql, userId, data.userId, data.follow);
   });
 
+/** Flips a block (kept for the website's older buttons; the phone app uses `setBlockedUser`). */
 export const blockUser = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((targetId: string) => targetId)
+  .validator((targetId: string) => z.string().min(1).max(100).parse(targetId))
   .handler(async ({ context, data: targetId }) => {
     const sql = await db();
     const { userId } = context as Authed;
-    if (userId === targetId) throw new Error("You cannot block yourself.");
-    const exists =
-      await sql`select 1 from blocks where blocker_id = ${userId} and blocked_id = ${targetId}`;
-    if (exists.length) {
-      await sql`delete from blocks where blocker_id = ${userId} and blocked_id = ${targetId}`;
-      return { blocked: false };
-    }
-    await sql`insert into blocks (blocker_id, blocked_id) values (${userId}, ${targetId})`;
-    return { blocked: true };
+    const exists = await sql`select 1 from blocks where blocker_id = ${userId} and blocked_id = ${targetId}`;
+    return (await loadMembership()).setBlock(sql, userId, targetId, !exists.length);
+  });
+
+/**
+ * Blocks (`blocked: true`) or unblocks (`blocked: false`) someone. Safe to repeat, so an out-of-date button can't do
+ * the opposite of what it shows. Blocking also ends follows and follow requests both ways.
+ */
+export const setBlockedUser = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { targetId: string; blocked: boolean }) => z.object({ targetId: z.string().min(1).max(100), blocked: z.boolean() }).parse(d))
+  .handler(async ({ context, data }) => {
+    const sql = await db();
+    const { userId } = context as Authed;
+    await guard(userId, "follow");
+    return (await loadMembership()).setBlock(sql, userId, data.targetId, data.blocked);
   });
 
 export const fileReport = createServerFn({ method: "POST" })
@@ -2882,6 +2890,43 @@ export const getMe = createServerFn({ method: "GET" })
     return { profile, joined, blocked };
   });
 
+const quietHour = z.number().int().min(0, "Quiet hours use whole hours from 0 to 23.").max(23, "Quiet hours use whole hours from 0 to 23.").nullable().optional();
+/** Everything Settings and Edit profile may change. Unknown or wrongly typed values are refused, not stored. */
+const settingsSchema = z.object({
+  displayName: z.string().max(200).optional(),
+  bio: z.string().max(2000).optional(),
+  dmPrivacy: z.enum(["everyone", "members", "none"]).optional(),
+  hideJoined: z.boolean().optional(),
+  showOnline: z.boolean().optional(),
+  ageConfirmed: z.boolean().optional(),
+  cover: z.string().max(2000).optional(),
+  mood: z.string().max(200).optional(),
+  status: z.string().max(400).optional(),
+  frame: z.string().max(40).optional(),
+  bubbleHue: z.number().finite().optional(),
+  bubbleStyle: z.string().max(40).optional(),
+  notifyLikes: z.boolean().optional(),
+  notifyComments: z.boolean().optional(),
+  notifyFollows: z.boolean().optional(),
+  notifyChat: z.boolean().optional(),
+  notifyWall: z.boolean().optional(),
+  pronouns: z.string().max(400).optional(),
+  location: z.string().max(400).optional(),
+  website: z.string().max(400).optional(),
+  headline: z.string().max(400).optional(),
+  profileCategories: z.array(z.string().max(40)).max(20).optional(),
+  interests: z.array(z.string().max(40)).max(60).optional(),
+  privateAccount: z.boolean().optional(),
+  showReadReceipts: z.boolean().optional(),
+  quietStart: quietHour,
+  quietEnd: quietHour,
+  notifyPrefs: z
+    .object({ social: z.boolean(), community: z.boolean(), events: z.boolean(), messages: z.boolean(), digest: z.boolean() })
+    .partial()
+    .optional(),
+  timezone: z.string().max(64).optional(),
+});
+
 export const updateSettings = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator(
@@ -2920,7 +2965,7 @@ export const updateSettings = createServerFn({ method: "POST" })
         /** Time zone name, for example "America/Vancouver". */
         timezone: string;
       }>,
-    ) => d,
+    ) => settingsSchema.parse(d ?? {}),
   )
   .handler(async ({ context, data }) => {
     const sql = await db();
@@ -2965,10 +3010,17 @@ export const updateSettings = createServerFn({ method: "POST" })
     const location = short(data.location, cur.location, 40);
     const headline = short(data.headline, cur.headline, 40);
     const website = data.website === undefined ? cur.website : cleanWebsite(data.website);
+    // Every public profile text that changed is checked (name, bio, mood and status were not, before). Unchanged
+    // text is not re-checked, so saving Edit profile doesn't send the same bio to the safety check every time.
+    const changed = (sent: unknown, value: string, current: string) => (sent !== undefined && value !== current ? value : "");
     const changedText = [
-      data.pronouns !== undefined ? pronouns : "",
-      data.location !== undefined ? location : "",
-      data.headline !== undefined ? headline : "",
+      changed(data.displayName, displayName, cur.displayName),
+      changed(data.bio, bio, cur.bio),
+      changed(data.mood, mood, cur.mood),
+      changed(data.status, status, cur.status),
+      changed(data.pronouns, pronouns, cur.pronouns),
+      changed(data.location, location, cur.location),
+      changed(data.headline, headline, cur.headline),
     ].filter(Boolean).join("\n");
     if (changedText) {
       // Profile text is public, like profile pictures: anything the safety check would hold is refused.
@@ -2990,6 +3042,8 @@ export const updateSettings = createServerFn({ method: "POST" })
     };
     const quietStart = hour(data.quietStart, cur.quietStart);
     const quietEnd = hour(data.quietEnd, cur.quietEnd);
+    if ((quietStart === null) !== (quietEnd === null)) throw new Error("Choose when quiet hours start and when they end.");
+    if (quietStart !== null && quietStart === quietEnd) throw new Error("Quiet hours need different start and end times.");
     const notifyPrefs = data.notifyPrefs === undefined ? cur.notifyPrefs : parseNotifyPrefs({ ...cur.notifyPrefs, ...data.notifyPrefs });
     const timezone = data.timezone === undefined ? cur.timezone : String(data.timezone).trim().slice(0, 64);
     if (!isValidTimezone(timezone)) throw new Error("Unknown time zone.");

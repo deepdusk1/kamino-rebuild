@@ -282,7 +282,8 @@ export function ProfileScreen({ handle, inTabs }: Props) {
     );
     if (!ok) return;
     await run("block", async () => {
-      await api.block(p.userId);
+      // Says what it wants (block / unblock), so an out-of-date screen can't flip it the wrong way.
+      await api.setBlocked(p.userId, !blocked);
       await queryClient.invalidateQueries();
     });
   };

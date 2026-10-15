@@ -69,12 +69,18 @@ export const getIdentityDashboard = createServerFn({ method: 'GET' }).middleware
   const rels = await sql`select r.kind, p.user_id, p.handle, p.display_name, p.avatar_hue from identity_relationships r join profiles p on p.user_id = r.target_user_id where r.user_id = ${userId} order by r.created_at desc`;
   const muted = await sql`select p.user_id, p.handle, p.display_name, p.avatar_hue from muted_people m join profiles p on p.user_id = m.muted_user_id where m.user_id = ${userId} order by p.display_name`;
   const sessions = await sql`select id, "createdAt", "updatedAt", "expiresAt", "userAgent" from "session" where "userId" = ${userId} and "expiresAt" > now() order by "updatedAt" desc`;
+  const { currentSessionId } = await import('@/lib/auth/verify.server');
+  const current = await currentSessionId().catch(() => null);
+  // Google / Apple accounts have no Kamino password (so no "change password" and no authenticator setup).
+  const hasPassword = (await sql`select 1 from "account" where "userId" = ${userId} and "providerId" = 'credential' and password is not null limit 1`).length > 0;
   const eligible = (value: unknown) => Boolean(value && new Date(String(value)).getTime() <= Date.now());
   return { preferences: preferences(row), email: String(account?.email ?? ''), emailVerified: asBool(account?.emailVerified), twoFactorEnabled: asBool(account?.twoFactorEnabled),
-    ageChecked: Boolean(row.age_checked_at), ageBand: eligible(row.age_eligible_at_18) ? '18+' : eligible(row.age_eligible_at_16) ? '16–17' : '13–15',
+    // Kamino is 18+ only: anyone who passed the check is 18+; anyone else simply hasn't confirmed yet.
+    ageChecked: Boolean(row.age_checked_at && row.min_age_confirmed_at), ageBand: eligible(row.age_eligible_at_18) ? '18+' : 'unconfirmed',
     people: rels.map(r => ({ kind: String(r.kind), userId: String(r.user_id), handle: String(r.handle), name: String(r.display_name), hue: Number(r.avatar_hue) })),
     muted: muted.map(r => ({ userId: String(r.user_id), handle: String(r.handle), name: String(r.display_name), hue: Number(r.avatar_hue) })),
-    sessions: sessions.map(r => ({ id: String(r.id), createdAt: new Date(String(r.createdAt)).toISOString(), lastActive: new Date(String(r.updatedAt)).toISOString(), expiresAt: new Date(String(r.expiresAt)).toISOString(), device: sessionDevice(r.userAgent) })),
+    sessions: sessions.map(r => ({ id: String(r.id), createdAt: new Date(String(r.createdAt)).toISOString(), lastActive: new Date(String(r.updatedAt)).toISOString(), expiresAt: new Date(String(r.expiresAt)).toISOString(), device: sessionDevice(r.userAgent), current: String(r.id) === current })),
+    hasPassword,
     isAdmin: await isSiteAdmin(sql, userId), emailDeliveryConfigured: Boolean(process.env.RESEND_API_KEY && process.env.MAIL_FROM), captchaConfigured: Boolean(process.env.TURNSTILE_SECRET_KEY),
   };
 });
@@ -95,7 +101,9 @@ export const updateIdentityPreferences = createServerFn({ method: 'POST' }).midd
   }
   const row = (await sql`select * from profiles where user_id = ${userId}`)[0]!;
   const cur = preferences(row); const adult = Boolean(row.age_eligible_at_18 && new Date(String(row.age_eligible_at_18)).getTime() <= Date.now());
-  if (data.sensitiveContent === 'show' && !adult) throw new Error('Teen accounts keep sensitive content blurred or hidden.');
+  if (data.sensitiveContent === 'show' && !adult) throw new Error('Confirm your age first to show sensitive content.');
+  // "Restricted mode" (13+ communities only) would hide every community in an 18+ app, so it is always off.
+  data.restrictedMode = false;
   await sql`update profiles set handle = ${data.handle ?? cur.handle}, language = ${data.language ?? cur.language}, social_links = ${JSON.stringify(data.socialLinks ?? cur.socialLinks)}, profile_hue = ${data.profileHue ?? cur.profileHue},
     mention_privacy = ${data.mentionPrivacy ?? cur.mentionPrivacy}, invite_privacy = ${data.invitePrivacy ?? cur.invitePrivacy}, search_visible = ${data.searchVisible ?? cur.searchVisible},
     hide_followers = ${data.hideFollowers ?? cur.hideFollowers}, hide_following = ${data.hideFollowing ?? cur.hideFollowing}, restricted_mode = ${data.restrictedMode ?? cur.restrictedMode},
@@ -121,14 +129,28 @@ export const setPersonRelationship = createServerFn({ method: 'POST' }).middlewa
 
 export const revokeIdentitySession = createServerFn({ method: 'POST' }).middleware([authMiddleware]).validator((id: string) => z.string().min(1).max(200).parse(id)).handler(async ({ context, data }) => {
   const sql = await db();
+  const { currentSessionId } = await import('@/lib/auth/verify.server');
+  const current = await currentSessionId().catch(() => null);
   await sql`delete from "session" where id = ${data} and "userId" = ${context.userId}`;
-  return { ok: true };
+  // `signedOut` tells the app it just ended its own session, so it signs out instead of failing every request.
+  return { ok: true, signedOut: data === current };
+});
+
+/** Signs out every other phone and browser, keeping this one. */
+export const revokeOtherIdentitySessions = createServerFn({ method: 'POST' }).middleware([authMiddleware]).handler(async ({ context }) => {
+  const sql = await db();
+  const { currentSessionId } = await import('@/lib/auth/verify.server');
+  const current = await currentSessionId();
+  if (!current) throw new Error('Sign in again, then try this.');
+  const ended = await sql`delete from "session" where "userId" = ${context.userId} and id <> ${current} returning id`;
+  return { ended: ended.length };
 });
 
 /** User-entered addresses are matched transiently, never retained or exposed. Requires search visibility. */
 export const findContacts = createServerFn({ method: 'POST' }).middleware([authMiddleware]).validator((emails: string[]) => z.array(z.email()).max(100).parse(emails)).handler(async ({ context, data }) => {
   const sql = await db(); const blocked = await blockedSet(sql, context.userId);
   const people = await sql`select p.* from profiles p join "user" u on u.id = p.user_id where lower(u.email) = any(${data.map(email => email.toLowerCase())}) and p.search_visible = true and p.user_id <> ${context.userId}
+    and (p.min_age_confirmed_at is not null or p.user_id like 'seed:%')
     and not exists(select 1 from identity_account_status s where s.user_id=p.user_id and(s.status='banned' or(s.status='suspended' and(s.until is null or s.until>now()))))`;
   return people.filter(p => !blocked.has(String(p.user_id))).map(p => ({ userId: String(p.user_id), handle: String(p.handle), name: String(p.display_name), hue: Number(p.avatar_hue) }));
 });

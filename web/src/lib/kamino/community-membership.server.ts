@@ -192,3 +192,57 @@ export async function useInvite(sql: Sql, code: string, communityId: string): Pr
   );
   return used.length > 0;
 }
+
+/**
+ * Blocks (`blocked: true`) or unblocks someone, and returns the result. Safe to repeat (the old toggle meant a stale
+ * "Unblock" button could block again). Blocking also ends follows and follow requests in both directions, so a
+ * blocked person no longer counts as a follower or sees "Following" on your profile.
+ */
+export async function setBlock(sql: Sql, userId: string, targetId: string, blocked: boolean): Promise<{ blocked: boolean }> {
+  if (!targetId || typeof targetId !== "string") throw new Error("Profile not found");
+  if (userId === targetId) throw new Error("You cannot block yourself.");
+  if (!blocked) {
+    await sql.query(`delete from blocks where blocker_id = $1 and blocked_id = $2`, [userId, targetId]);
+    return { blocked: false };
+  }
+  await sql.query(`insert into blocks (blocker_id, blocked_id) values ($1, $2) on conflict do nothing`, [userId, targetId]);
+  await sql.query(
+    `delete from profile_follows where (follower_id = $1 and followee_id = $2) or (follower_id = $2 and followee_id = $1)`,
+    [userId, targetId],
+  );
+  await sql.query(
+    `delete from follow_requests where (follower_id = $1 and followee_id = $2) or (follower_id = $2 and followee_id = $1)`,
+    [userId, targetId],
+  );
+  return { blocked: true };
+}
+
+/**
+ * Before an owner's account is deleted, each community they own gets a new owner: a co-leader first, then a curator,
+ * then the member with the most reputation (longest-standing on ties). A community with nobody else in it is left
+ * as it is. Returns how many communities changed hands.
+ */
+export async function handOverOwnedCommunities(sql: Sql, userId: string): Promise<number> {
+  const owned = await sql.query<{ community_id: string }>(
+    `select community_id from memberships where user_id = $1 and role = 'agent' and status = 'active'`,
+    [userId],
+  );
+  let moved = 0;
+  for (const { community_id: communityId } of owned) {
+    const next = (
+      await sql.query<{ user_id: string }>(
+        `select user_id from memberships
+         where community_id = $1 and user_id <> $2 and status = 'active'
+         order by case role when 'leader' then 0 when 'curator' then 1 else 2 end, rep desc, joined_at, user_id
+         limit 1`,
+        [communityId, userId],
+      )
+    )[0];
+    if (!next) continue;
+    await sql.query(`update memberships set role = 'agent' where community_id = $1 and user_id = $2`, [communityId, next.user_id]);
+    await sql.query(`update memberships set role = 'member' where community_id = $1 and user_id = $2`, [communityId, userId]);
+    await sql.query(`update communities set created_by = $2 where id = $1`, [communityId, next.user_id]);
+    moved += 1;
+  }
+  return moved;
+}
