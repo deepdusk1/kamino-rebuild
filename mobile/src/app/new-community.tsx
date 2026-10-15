@@ -12,7 +12,6 @@ import {
   Switch,
   View,
 } from "react-native";
-import { rpc } from "@/api/client";
 import { api } from "@/api/endpoints";
 import { notify } from "@/components/community/platform";
 import {
@@ -102,15 +101,6 @@ const DEFAULT_STARTER_RULES: readonly string[] = [
   "Tag major episode or story spoilers clearly in your post titles.",
   "Credit original creators when sharing fan art, cosplay, or edits.",
 ];
-
-type CreateCommunityRpcResult = {
-  slug?: string;
-  id?: string;
-  community?: {
-    id?: string;
-    slug?: string;
-  };
-};
 
 function slugifyName(raw: string): string {
   return raw
@@ -268,63 +258,42 @@ export default function NewCommunityWizard() {
     setSubmitting(true);
     setErrorMsg(null);
 
-    const visibilityValue: "public" | "private" =
-      privacy === "public" ? "public" : "private";
-
-    const payload = {
-      name: name.trim(),
-      slug: generatedSlug,
-      tagline: tagline.trim(),
-      description: tagline.trim(),
-      category,
-      hue,
-      visibility: visibilityValue,
-      privacy,
-      unlisted: privacy === "secret",
-      mature18Plus: isMature18Plus,
-      topics: selectedTags.map((t) => t.replace(/^#/, "")),
-      rules,
-      icon: iconDataUrl,
-      cover: coverDataUrl,
-    };
+    // "Secret" communities are the server's "unlisted": hidden from search, joined by link.
+    const visibilityValue: "public" | "private" | "unlisted" =
+      privacy === "public" ? "public" : privacy === "secret" ? "unlisted" : "private";
+    const cleanTopics = selectedTags.map((t) => t.replace(/^#/, "")).filter(Boolean).slice(0, 8);
 
     try {
-      let createdSlug = generatedSlug;
+      const created = await api.createCommunity({
+        name: name.trim(),
+        tagline: tagline.trim(),
+        description: tagline.trim(),
+        category,
+        visibility: visibilityValue,
+        // The server sets the age gate itself; 18 is sent when the mature box is ticked.
+        ageGate: isMature18Plus ? 18 : 13,
+        rules: rules.map((r, n) => `${n + 1}. ${r}`).join("\n"),
+      });
+      const createdSlug = created.id;
+
+      // The community exists now. Its look and topics are saved next; if one of those fails the leader
+      // can finish it on the community's Look page, so we say so instead of failing the whole thing.
+      const followUps: string[] = [];
       try {
-        const res = await rpc<CreateCommunityRpcResult>(
-          "createCommunity",
-          payload,
-        );
-        createdSlug =
-          res.slug ??
-          res.id ??
-          res.community?.slug ??
-          res.community?.id ??
-          generatedSlug;
-      } catch {
-        const fallbackRes = await api.createCommunity({
-          name: payload.name,
-          tagline: payload.tagline,
-          category: payload.category,
-          hue: payload.hue,
-          visibility: payload.visibility,
-          icon: payload.icon ?? undefined,
-          cover: payload.cover ?? undefined,
+        await api.updateLook({
+          slug: createdSlug,
+          hue,
+          ...(coverDataUrl ? { coverUpload: coverDataUrl } : {}),
+          ...(iconDataUrl ? { iconUpload: iconDataUrl } : {}),
         });
-        if (
-          fallbackRes &&
-          typeof fallbackRes === "object" &&
-          "slug" in fallbackRes &&
-          typeof (fallbackRes as { slug?: unknown }).slug === "string"
-        ) {
-          createdSlug = (fallbackRes as { slug: string }).slug;
-        } else if (
-          fallbackRes &&
-          typeof fallbackRes === "object" &&
-          "id" in fallbackRes &&
-          typeof (fallbackRes as { id?: unknown }).id === "string"
-        ) {
-          createdSlug = (fallbackRes as { id: string }).id;
+      } catch {
+        followUps.push("the banner and icon");
+      }
+      if (cleanTopics.length) {
+        try {
+          await api.setCommunityTopics(createdSlug, cleanTopics);
+        } catch {
+          followUps.push("the topics");
         }
       }
 
@@ -333,8 +302,10 @@ export default function NewCommunityWizard() {
       void queryClient.invalidateQueries({ queryKey: ["exploreOverview"] });
       void queryClient.invalidateQueries({ queryKey: ["homeOverview"] });
       notify(
-        "Community Launched! 🎉",
-        `${name.trim()} is live. Invite your friends and publish your first post!`,
+        "Your community is live 🎉",
+        followUps.length
+          ? `${name.trim()} is ready. We couldn't save ${followUps.join(" or ")}; you can add them from the community's Look page.`
+          : `${name.trim()} is ready. Invite your friends and write the first post!`,
       );
       router.replace(`/community/${createdSlug}`);
     } catch (submitErr) {

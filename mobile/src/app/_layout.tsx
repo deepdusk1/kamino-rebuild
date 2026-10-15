@@ -483,10 +483,6 @@ function Navigation() {
             options={{ title: "Story" }}
           />
           <Stack.Screen
-            name="community/[slug]/story/[sceneId]"
-            options={{ headerShown: false }}
-          />
-          <Stack.Screen
             name="chat/[roomId]"
             options={{ headerShown: false }}
           />
@@ -512,7 +508,7 @@ function Navigation() {
           />
           <Stack.Screen
             name="new-community"
-            options={{ title: "New community", presentation: "modal" }}
+            options={{ headerShown: false, presentation: "modal" }}
           />
           <Stack.Screen
             name="notifications"
@@ -540,13 +536,13 @@ function Navigation() {
           />
           <Stack.Screen
             name="content-studio"
-            options={{ title: "Content studio" }}
+            options={{ headerShown: false }}
           />
           <Stack.Screen
             name="profile-stories"
             options={{ title: "Profile stories" }}
           />
-          <Stack.Screen name="inbox-tools" options={{ title: "Chat tools" }} />
+          <Stack.Screen name="inbox-tools" options={{ headerShown: false }} />
           <Stack.Screen
             name="connections"
             options={{ title: "Connections" }}
@@ -581,7 +577,7 @@ function Navigation() {
           />
           <Stack.Screen
             name="profile-content"
-            options={{ title: "Profile content" }}
+            options={{ headerShown: false }}
           />
           <Stack.Screen name="tutorial" options={{ title: "Welcome tour" }} />
           <Stack.Screen

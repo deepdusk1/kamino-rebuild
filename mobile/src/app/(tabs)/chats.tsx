@@ -16,6 +16,8 @@ import { rpc } from "@/api/client";
 import { api } from "@/api/endpoints";
 import { useSSEListener } from "@/api/sse";
 import type { ChatOverviewRoom } from "@/api/types";
+import { contentApi } from "@/lib/content-v9";
+
 import { ActionMenu, type MenuItem } from "@/components/community/ActionMenu";
 import { confirmAction, notify } from "@/components/community/platform";
 import {
@@ -44,16 +46,19 @@ import { previewText } from "@/lib/stickers";
 import { useDebounced } from "@/lib/useDebounced";
 import { font, radius, shadow, useTheme } from "@/theme";
 
+/**
+ * A chat-list row: exactly the fields `normalizeOverviewRoom` reads from the server (including the colour,
+ * live head-count and `privateGroup`, a private group chat — the only kind you can leave from the list).
+ */
+type InboxRoom = NonNullable<ReturnType<typeof normalizeOverviewRoom>>;
+
 type ChatFolderTab = "inbox" | "groups" | "requests";
 
 type ChatsOverviewPayload = {
-  rooms: ChatOverviewRoom[];
+  rooms: InboxRoom[];
   requests: number;
 };
 
-type OpenDmRpcResult = {
-  roomId: number;
-};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -72,7 +77,7 @@ function toStringOrEmpty(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-function normalizeOverviewRoom(raw: unknown): ChatOverviewRoom | null {
+function normalizeOverviewRoom(raw: unknown) {
   if (!isRecord(raw)) return null;
   const id = toFiniteNumber(raw.id ?? raw.roomId, 0);
   if (!id) return null;
@@ -105,7 +110,10 @@ function normalizeOverviewRoom(raw: unknown): ChatOverviewRoom | null {
       typeof raw.communityName === "string" && raw.communityName
         ? raw.communityName
         : null,
-    hue: toFiniteNumber(raw.hue ?? raw.avatarHue, 260),
+    hue: toFiniteNumber(raw.hue ?? raw.peerHue ?? raw.avatarHue, 260),
+    peerUserId: typeof raw.peerUserId === "string" && raw.peerUserId ? raw.peerUserId : null,
+    peerAvatarV: toFiniteNumber(raw.peerAvatarV, 0),
+    privateGroup: rawKind === "group",
     unread: Math.max(0, toFiniteNumber(raw.unread ?? raw.unreadCount, 0)),
     muted: Boolean(raw.muted),
     pinned: Boolean(raw.pinned),
@@ -141,7 +149,7 @@ function normalizeListRoomsPayload(raw: unknown): ChatsOverviewPayload {
   if (Array.isArray(raw)) {
     const rooms = raw
       .map(normalizeOverviewRoom)
-      .filter((r): r is ChatOverviewRoom => r !== null);
+      .filter((r): r is InboxRoom => r !== null);
     const requests = rooms.filter((r) => r.isRequest).length;
     return { rooms, requests };
   }
@@ -153,7 +161,7 @@ function normalizeListRoomsPayload(raw: unknown): ChatsOverviewPayload {
         : [];
     const rooms = listRaw
       .map(normalizeOverviewRoom)
-      .filter((r): r is ChatOverviewRoom => r !== null);
+      .filter((r): r is InboxRoom => r !== null);
     const explicitReq = toFiniteNumber(raw.requests, -1);
     const requests =
       explicitReq >= 0 ? explicitReq : rooms.filter((r) => r.isRequest).length;
@@ -182,7 +190,7 @@ export default function ChatsTabScreen() {
 
   const [folder, setFolder] = useState<ChatFolderTab>("inbox");
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedRoom, setSelectedRoom] = useState<ChatOverviewRoom | null>(
+  const [selectedRoom, setSelectedRoom] = useState<InboxRoom | null>(
     null,
   );
   const [newChatOpen, setNewChatOpen] = useState(false);
@@ -280,7 +288,7 @@ export default function ChatsTabScreen() {
     }
   });
 
-  const allRooms = roomsQuery.data?.rooms ?? [];
+  const allRooms = useMemo(() => roomsQuery.data?.rooms ?? [], [roomsQuery.data?.rooms]);
 
   // Compute unread badge counts per folder tab
   const folderCounts = useMemo(() => {
@@ -341,13 +349,13 @@ export default function ChatsTabScreen() {
 
   const patchRoomInCache = (
     roomId: number,
-    updater: (r: ChatOverviewRoom) => ChatOverviewRoom | null,
+    updater: (r: InboxRoom) => InboxRoom | null,
   ) => {
     queryClient.setQueryData<ChatsOverviewPayload>(
       ["chatsOverview"],
       (old) => {
         if (!old) return old;
-        const nextRooms: ChatOverviewRoom[] = [];
+        const nextRooms: InboxRoom[] = [];
         for (const r of old.rooms) {
           if (r.id !== roomId) {
             nextRooms.push(r);
@@ -361,24 +369,24 @@ export default function ChatsTabScreen() {
     );
   };
 
-  const handleTogglePin = async (room: ChatOverviewRoom) => {
+  const handleTogglePin = async (room: InboxRoom) => {
     const nextPinned = !room.pinned;
     haptic.tap();
     patchRoomInCache(room.id, (r) => ({ ...r, pinned: nextPinned }));
     try {
-      await api.pinRoom(room.id, nextPinned);
+      await api.roomPreference(room.id, { pinned: nextPinned });
     } catch (err) {
       patchRoomInCache(room.id, (r) => ({ ...r, pinned: room.pinned }));
       showError(err);
     }
   };
 
-  const handleToggleMute = async (room: ChatOverviewRoom) => {
+  const handleToggleMute = async (room: InboxRoom) => {
     const nextMuted = !room.muted;
     haptic.tap();
     patchRoomInCache(room.id, (r) => ({ ...r, muted: nextMuted }));
     try {
-      await api.muteRoom(room.id, nextMuted);
+      await api.roomPreference(room.id, { muted: nextMuted });
       notify(
         nextMuted ? "Conversation muted" : "Conversation unmuted",
         nextMuted
@@ -391,7 +399,7 @@ export default function ChatsTabScreen() {
     }
   };
 
-  const handleMarkRoomRead = async (room: ChatOverviewRoom) => {
+  const handleMarkRoomRead = async (room: InboxRoom) => {
     haptic.tap();
     patchRoomInCache(room.id, (r) => ({ ...r, unread: 0 }));
     try {
@@ -402,19 +410,19 @@ export default function ChatsTabScreen() {
     }
   };
 
-  const handleLeaveOrDeleteRoom = async (room: ChatOverviewRoom) => {
+  const handleLeaveOrDeleteRoom = async (room: InboxRoom) => {
+    // Only private group chats can be left from here; the menu hides this for every other kind.
+    if (!room.privateGroup) return;
     const ok = await confirmAction(
-      room.isGroup ? `Leave ${room.name}?` : `Remove chat with ${room.name}?`,
-      room.isGroup
-        ? "You can rejoin from the community page anytime."
-        : "This removes the thread from your inbox.",
-      room.isGroup ? "Leave" : "Remove",
+      `Leave ${room.name}?`,
+      "You'll stop getting its messages. Someone in the group can add you back.",
+      "Leave",
       true,
     );
     if (!ok) return;
     patchRoomInCache(room.id, () => null);
     try {
-      await api.leaveRoom(room.id);
+      await contentApi.updateGroup(room.id, { leave: true });
     } catch (err) {
       void roomsQuery.refetch();
       showError(err);
@@ -426,15 +434,9 @@ export default function ChatsTabScreen() {
     if (!target || startingDm) return;
     setStartingDm(true);
     try {
-      let roomId: number | null = null;
-      try {
-        const profile = await api.profileOverview(target);
-        const dm = await api.openDm(profile.profile.userId);
-        roomId = dm.roomId;
-      } catch {
-        const dm = await rpc<OpenDmRpcResult>("openDm", { userId: target });
-        roomId = dm.roomId;
-      }
+      // The box takes a @handle: look the person up, then open (or create) the conversation with them.
+      const profile = await api.profileOverview(target);
+      const { roomId } = await api.openDm(profile.profile.userId);
       setNewChatOpen(false);
       setRecipientInput("");
       haptic.success();
@@ -449,18 +451,13 @@ export default function ChatsTabScreen() {
     }
   };
 
-  const openRoom = (room: ChatOverviewRoom) => {
+  const openRoom = (room: InboxRoom) => {
     haptic.tap();
     if (room.unread > 0) {
       patchRoomInCache(room.id, (r) => ({ ...r, unread: 0 }));
     }
-    if (room.kind === "voice") {
-      router.push(`/live/${room.id}`);
-    } else if (room.kind === "screening") {
-      router.push(`/chat/watch/${room.id}`);
-    } else {
-      router.push(`/chat/${room.id}`);
-    }
+    // Voice and watch rooms open in the chat room too: it has the stage controls and the "watch together" button.
+    router.push(`/chat/${room.id}`);
   };
 
   const roomMenuItems: MenuItem[] = selectedRoom
@@ -501,15 +498,17 @@ export default function ChatsTabScreen() {
           tone: "orange",
           onPress: () => void handleToggleMute(selectedRoom),
         },
-        {
-          key: "leave",
-          label: selectedRoom.isGroup
-            ? "Leave group room"
-            : "Remove conversation",
-          icon: "trash-outline",
-          destructive: true,
-          onPress: () => void handleLeaveOrDeleteRoom(selectedRoom),
-        },
+        ...(selectedRoom.privateGroup
+          ? [
+              {
+                key: "leave",
+                label: "Leave group",
+                icon: "exit-outline" as const,
+                destructive: true,
+                onPress: () => void handleLeaveOrDeleteRoom(selectedRoom),
+              },
+            ]
+          : []),
       ]
     : [];
 
@@ -929,7 +928,7 @@ function ConversationRow({
   onPress,
   onLongPress,
 }: {
-  room: ChatOverviewRoom;
+  room: InboxRoom;
   typingLabel?: string;
   onPress: () => void;
   onLongPress: () => void;
@@ -972,7 +971,8 @@ function ConversationRow({
           person={{
             name: room.name,
             hue: room.hue,
-            userId: room.peerHandle ?? undefined,
+            userId: room.peerUserId ?? undefined,
+            avatarV: room.peerAvatarV,
           }}
           size={52}
           online={!room.isGroup ? room.peerOnline : undefined}

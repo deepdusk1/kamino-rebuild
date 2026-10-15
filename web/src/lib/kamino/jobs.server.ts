@@ -285,5 +285,5 @@ export async function runNotificationJobs() {
   });
   await sql`update progression_seasons set status='active' where status='scheduled' and starts_at<=now() and ends_at>now()`;
   await sql`update progression_seasons set status='ended' where status in ('scheduled','active') and ends_at<=now()`;
-  return { delivered, mediaDeletion, push, email, semanticIndex, checkedAt: now.toISOString() };
+  return { delivered, mediaDeletion, earningsReconciled, mediaJobs, push, email, semanticIndex, checkedAt: now.toISOString() };
 }

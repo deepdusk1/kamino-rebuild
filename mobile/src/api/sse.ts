@@ -6,12 +6,28 @@ import { apiBaseUrl } from "@/api/config";
 import type { LiveStageState } from "@/api/community-v9";
 import type { NotificationsFeed } from "@/api/models";
 import type {
+  AuthorChip,
   ChatMessage,
   ChatOverviewRoom,
   NotificationItem,
-  UserChip,
+  Role,
 } from "@/api/types";
 import { readSecret } from "@/auth/storage";
+
+/** A message author as chat messages carry it: the usual chip plus their role in the room's community. */
+type UserChip = AuthorChip & { role: Role };
+
+/**
+ * The names the Kamino server actually sends on `/api/events` (see web/src/lib/kamino/events.server.ts),
+ * mapped to the event types handled below. The server sends ids only; screens reload what changed.
+ */
+const SERVER_EVENT_ALIASES: Record<string, KaminoRealtimeEventType> = {
+  typing: "chat.typing",
+  receipt: "chat.read",
+  call: "call.incoming",
+  "call-declined": "call.ended",
+  voice: "stage.update",
+};
 
 const SESSION_TOKEN_KEY = "kamino.session-token";
 const HEARTBEAT_WATCHDOG_MS = 35_000;
@@ -204,80 +220,7 @@ function parseWatchSync(raw: Record<string, unknown>, roomId: number | null): Wa
   };
 }
 
-function parseLiveStage(raw: unknown): LiveStageState | null {
-  if (!isRecord(raw)) return null;
-  const roomId = toFiniteNumber(raw.roomId ?? raw.room_id);
-  if (roomId === null) return null;
-  const participantsRaw = Array.isArray(raw.participants) ? raw.participants : [];
-  const participants: LiveStageState["participants"] = [];
-  for (const p of participantsRaw) {
-    if (!isRecord(p) || typeof p.userId !== "string") continue;
-    participants.push({
-      userId: p.userId,
-      nickname: typeof p.nickname === "string" ? p.nickname : "Member",
-      role: p.role === "host" || p.role === "speaker" ? p.role : "member",
-      cohost: Boolean(p.cohost),
-      muted: Boolean(p.muted),
-      raised: Boolean(p.raised),
-    });
-  }
-  return {
-    roomId,
-    title: typeof raw.title === "string" ? raw.title : "",
-    topic: typeof raw.topic === "string" ? raw.topic : "",
-    recording: Boolean(raw.recording),
-    participants,
-    reactions: Array.isArray(raw.reactions)
-      ? raw.reactions.filter(
-          (r): r is { emoji: string; userId: string; at: string } =>
-            isRecord(r) && typeof r.emoji === "string" && typeof r.userId === "string" && typeof r.at === "string",
-        )
-      : [],
-  };
-}
 
-function parseNotificationItem(raw: unknown): NotificationItem | null {
-  if (!isRecord(raw)) return null;
-  const id = toFiniteNumber(raw.id ?? raw.notificationId);
-  if (id === null) return null;
-  const actorChip = parseUserChip(raw.actor);
-  return {
-    id,
-    title: typeof raw.title === "string" ? raw.title : "Kamino",
-    body: typeof raw.body === "string" ? raw.body : "",
-    verb: typeof raw.verb === "string" ? raw.verb : "",
-    href: typeof raw.href === "string" ? raw.href : "",
-    read: Boolean(raw.read),
-    createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
-    category:
-      raw.category === "mentions" ||
-      raw.category === "follows" ||
-      raw.category === "community" ||
-      raw.category === "events" ||
-      raw.category === "messages"
-        ? raw.category
-        : "all",
-    actor: actorChip
-      ? {
-          ...actorChip,
-          headline: isRecord(raw.actor) && typeof raw.actor.headline === "string" ? raw.actor.headline : "",
-          followers: isRecord(raw.actor) ? (toFiniteNumber(raw.actor.followers) ?? 0) : 0,
-        }
-      : null,
-    actorFollowed: Boolean(raw.actorFollowed),
-    action:
-      raw.action === "followBack" || raw.action === "join" || raw.action === "open"
-        ? raw.action
-        : null,
-    actionTarget: typeof raw.actionTarget === "string" ? raw.actionTarget : "",
-    snippet: typeof raw.snippet === "string" ? raw.snippet : null,
-    thumb: typeof raw.thumb === "string" ? raw.thumb : null,
-    live: Boolean(raw.live),
-    community: null,
-    room: null,
-    event: null,
-  };
-}
 
 function normalizeEventType(rawEventName: string, payload: Record<string, unknown>): KaminoRealtimeEventType {
   const candidate = (
@@ -291,6 +234,9 @@ function normalizeEventType(rawEventName: string, payload: Record<string, unknow
   )
     .trim()
     .toLowerCase();
+
+  const alias = SERVER_EVENT_ALIASES[candidate];
+  if (alias) return alias;
 
   switch (candidate) {
     case "chat.message":
@@ -648,10 +594,8 @@ class KaminoSSEManager {
         ? parseChatMessage(parsedPayload.message ?? parsedPayload, roomId)
         : null;
 
-    const stage =
-      type === "stage.update" || type === "live.stage_update"
-        ? parseLiveStage(parsedPayload.stage ?? parsedPayload)
-        : null;
+    // The server sends only ids for stage changes and notifications; those screens reload what changed.
+    const stage: LiveStageState | null = null;
 
     const watchSync =
       type === "watch.sync" || type === "watchparty.sync"
@@ -661,15 +605,12 @@ class KaminoSSEManager {
           )
         : null;
 
-    const notification =
-      type === "notification.new" || type === "notification"
-        ? parseNotificationItem(parsedPayload.notification ?? parsedPayload)
-        : null;
+    const notification: NotificationItem | null = null;
 
     const event: KaminoRealtimeEvent = {
       id: resolvedId,
       type,
-      roomId: roomId ?? message?.roomId ?? stage?.roomId ?? watchSync?.roomId ?? null,
+      roomId: roomId ?? message?.roomId ?? watchSync?.roomId ?? null,
       message,
       notification,
       stage,
@@ -953,7 +894,10 @@ export function useRealtimeSSE(signedIn: boolean): void {
  */
 export function useSSEListener(listener: SSEListener): void {
   const callbackRef = useRef<SSEListener>(listener);
-  callbackRef.current = listener;
+  // Keep the latest callback without re-subscribing (updated after render, never during it).
+  useEffect(() => {
+    callbackRef.current = listener;
+  }, [listener]);
 
   useEffect(() => {
     return sseManager.addListener((event) => {

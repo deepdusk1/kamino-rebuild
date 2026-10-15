@@ -123,6 +123,9 @@ function Discovery() {
       {q.data ? (
         <>
           <Txt variant="heading">Communities you may like</Txt>
+          {q.data.communities.length ? null : (
+            <Txt tone="muted">Nothing new to suggest right now. Try a search or a different area.</Txt>
+          )}
           {q.data.communities.map((c) => (
             <Card key={String(c.id)}>
               <Txt
@@ -174,7 +177,7 @@ function Discovery() {
             {q.data.relatedCreators.map(c => <Button key={String(c.user_id)} label={`${c.display_name} · @${c.handle} · ${c.related_posts} related posts`} variant="ghost" onPress={() => router.push(`/profile/${c.handle}` as never)}/>)}
             {!q.data.relatedCreators.length ? <Txt tone="muted">No related creators yet. Public work will appear as the community grows.</Txt> : null}
           </Card> : null}
-          <Txt variant="heading">Trending posts</Txt>
+          {q.data.posts.length ? <Txt variant="heading">Trending posts</Txt> : null}
           {q.data.posts.map((p) => (
             <Card
               key={Number(p.id)}
@@ -191,61 +194,7 @@ function Discovery() {
               </Txt>
             </Card>
           ))}
-          <Card>
-            <Txt variant="heading">Upcoming events</Txt>
-            {q.data.events.map((e) => (
-              <Button
-                key={Number(e.id)}
-                variant="ghost"
-                label={`${e.title} · ${new Date(String(e.starts_at)).toLocaleDateString()}`}
-                onPress={() =>
-                  router.push(`/community/${e.community_id}/events` as never)
-                }
-              />
-            ))}
-          </Card>
-          <Card>
-            <Txt variant="heading">Continue conversations</Txt>
-            {q.data.chats.map((c) => (
-              <Button
-                key={Number(c.id)}
-                label={String(c.name)}
-                variant="ghost"
-                onPress={() => router.push(`/chat/${c.id}` as never)}
-              />
-            ))}
-            <Button
-              label="Saved posts"
-              variant="secondary"
-              onPress={() => router.push("/saved")}
-            />
-          </Card>
-          <Card>
-            <Txt variant="heading">Live now</Txt>
-            {q.data.live.length ? (
-              q.data.live.map((r) => (
-                <Button
-                  key={Number(r.id)}
-                  label={`${r.name} · ${r.listeners} listeners`}
-                  variant="ghost"
-                  onPress={() => router.push(`/chat/${r.id}` as never)}
-                />
-              ))
-            ) : (
-              <Txt tone="muted">No active rooms right now.</Txt>
-            )}
-          </Card>
-          <Card>
-            <Txt variant="heading">Recently visited</Txt>
-            {q.data.visits.map((c) => (
-              <Button
-                key={String(c.id)}
-                label={String(c.name)}
-                variant="ghost"
-                onPress={() => router.push(`/community/${c.id}` as never)}
-              />
-            ))}
-          </Card>
+          {q.data.collections.length ? (
           <Card>
             <Txt variant="heading">Featured collections</Txt>
             {q.data.collections.map((c) => (
@@ -263,6 +212,7 @@ function Discovery() {
               </View>
             ))}
           </Card>
+          ) : null}
           <Card>
             <Txt variant="heading">Trending searches</Txt>
             {q.data.trending.length ? (

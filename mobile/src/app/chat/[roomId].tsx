@@ -1,2268 +1,478 @@
-// ===== FILE: mobile/src/app/chat/[roomId].tsx =====
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import * as Clipboard from "expo-clipboard";
-import { LinearGradient } from "expo-linear-gradient";
 import { router, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  TextInput,
-  View,
-} from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { rpc } from "@/api/client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, View } from "react-native";
 import { api } from "@/api/endpoints";
-import { platform } from "@/api/platform-v9";
-import { useSSEListener } from "@/api/sse";
-import type { ChatMessage, UserChip } from "@/api/types";
+import type { ChatMessage } from "@/api/types";
+import { ChatBanner, ChatHeader, ChatInputBar, TypingBubble } from "@/components/chat/ChatChrome";
 import { MessageBubble } from "@/components/chat/MessageBubble";
-import { ActionMenu, type MenuItem } from "@/components/community/ActionMenu";
-import { confirmAction, notify } from "@/components/community/platform";
-import {
-  EmptyHint,
-  GradientButton,
-  PersonAvatar,
-  Pill,
-  VerifiedTick,
-} from "@/components/k";
+import { formatSeconds } from "@/components/chat/MessageMedia";
+import { RoomSettings } from "@/components/chat/RoomSettings";
+import { roomPerson, roomTitle } from "@/components/chat/rooms";
+import { StickerPicker } from "@/components/chat/StickerPicker";
+import { OptionRow } from "@/components/create/parts";
+import { EmptyHint, GradientButton, PersonAvatar } from "@/components/k";
 import { ReportSheet, type ReportTarget } from "@/components/ReportSheet";
-import {
-  Button,
-  ErrorState,
-  Field,
-  Loading,
-  PressableScale,
-  Sheet,
-  Txt,
-} from "@/components/ui";
-import { showError } from "@/lib/errors";
-import { haptic } from "@/lib/haptics";
-import { pickPhoto } from "@/lib/media";
-import {
-  enqueueMessage,
-  listQueuedMessages,
-  type QueuedMessage,
-} from "@/lib/offline-queue";
-import {
-  STICKERS,
-  encodeSticker,
-  previewText,
-  stickerEmoji,
-} from "@/lib/stickers";
-import { font, radius, shadow, useTheme } from "@/theme";
+import { ErrorState, Field, Loading, PressableScale, Sheet, Txt } from "@/components/ui";
+import { errorMessage, showError } from "@/lib/errors";
+import { timeAgo } from "@/lib/format";
+import { tellIfHeld } from "@/lib/held";
+import { pickPhoto, pickVideo } from "@/lib/media";
+import { previewText, stickerToken } from "@/lib/stickers";
+import { useDebounced } from "@/lib/useDebounced";
+import { useVoiceRecorder } from "@/lib/useVoiceRecorder";
+import { font, radius, useTheme } from "@/theme";
+import { ChatContentTools, ChatMessageContent } from "@/components/content/ChatContentTools";
+import { StageControlsV9 } from "@/components/StageControlsV9";
+import { enqueueMessage, newClientTag } from "@/lib/offline-queue";
 
-const QUICK_REACTIONS = ["❤️", "🔥", "😂", "👏", "😮", "💜"] as const;
-
-const VOICE_NOTE_PRESETS: readonly {
-  key: string;
-  label: string;
-  durationSec: number;
-  caption: string;
-}[] = [
-  {
-    key: "vn-short",
-    label: "Quick Voice Note (0:08)",
-    durationSec: 8,
-    caption: "🎙️ Voice note (0:08)",
-  },
-  {
-    key: "vn-med",
-    label: "Theory Voice Note (0:24)",
-    durationSec: 24,
-    caption: "🎙️ Voice note (0:24)",
-  },
-  {
-    key: "vn-long",
-    label: "Full Recap Voice Note (0:45)",
-    durationSec: 45,
-    caption: "🎙️ Voice note (0:45)",
-  },
-];
-
-type RoomHeaderInfo = {
-  id: number;
-  name: string;
-  kind: string;
-  topic?: string;
-  communityId?: string | null;
-  peerHandle?: string | null;
-  peerUserId?: string | null;
-  peerOnline?: boolean;
-  peerVerified?: boolean;
-  hue?: number;
-  watchUrl?: string | null;
-  watchTitle?: string | null;
-  pinnedMessageId?: number | null;
-};
-
-type RoomPageData = {
-  room: RoomHeaderInfo;
-  messages: ChatMessage[];
-  participants: { userId: string; name: string }[];
-  voices: { userId: string; name: string }[];
-};
-
-type TypingState = {
-  userIds: string[];
-  names: string[];
-};
-
-type ReceiptsState = {
-  seenBy: { userId: string; lastReadId: number }[];
-};
-
-type GetOlderMessagesRpcResult = {
-  messages?: ChatMessage[];
-  items?: ChatMessage[];
-};
-
-type SendMessageRpcResult = {
-  id?: number;
-  messageId?: number;
-  message?: ChatMessage;
-};
-
-type AiAssistantRpcResult = {
-  text: string;
-};
-
-type ScheduledDraftItem = {
-  id: string;
-  body: string;
-  scheduledForLabel: string;
-};
-
-type TimelineItem =
-  | { kind: "divider"; id: string; label: string }
-  | {
-      kind: "message";
-      id: string;
-      message: ChatMessage;
-      pending?: boolean;
-      showName: boolean;
-      showAvatar: boolean;
-      showTime: boolean;
-      receipt: string | null;
-    };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function toFiniteNumber(value: unknown, fallback = 0): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim())) {
-    const parsed = Number(value.trim());
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-  return fallback;
-}
-
-function formatDateDivider(isoDate: string): string {
-  const dt = new Date(isoDate);
-  if (Number.isNaN(dt.getTime())) return "Today";
-  const now = new Date();
-  const todayKey = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
-  const msgKey = `${dt.getFullYear()}-${dt.getMonth()}-${dt.getDate()}`;
-  if (todayKey === msgKey) return "Today";
-
-  const yesterday = new Date(now.getTime() - 86_400_000);
-  const yKey = `${yesterday.getFullYear()}-${yesterday.getMonth()}-${yesterday.getDate()}`;
-  if (yKey === msgKey) return "Yesterday";
-
-  return dt.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: dt.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
-  });
-}
-
-function dayBucketKey(isoDate: string): string {
-  const dt = new Date(isoDate);
-  if (Number.isNaN(dt.getTime())) return "today";
-  return `${dt.getFullYear()}-${dt.getMonth()}-${dt.getDate()}`;
-}
+const REACTIONS = ["❤️", "😂", "✨", "🔥", "👏", "😮"];
+type Media = { kind: "image" | "audio" | "video"; dataUrl: string };
+/** How often we tell the server "I'm typing" while the person types (the server forgets after 6 s). */
+const TYPING_EVERY_MS = 4000;
 
 /**
- * Chat Thread Screen (`mobile/src/app/chat/[roomId].tsx`) — Pixel-faithful to Mockup 4 Right Pane:
- * - Header: Back button, Avatar with live online dot, Name + Verified tick, Online/Typing/Members status,
- *   Audio Call button (`/call/[roomId]`), Video Call / Watch Party button, and `⋯` options menu
- * - Pinned Message Banner under header with one-tap scroll-to-message & unpin
- * - Date dividers (`Today`, `Yesterday`, `Oct 12`) + MessageBubble stream (text, cached image + lightbox,
- *   video player, voice-note waveform player, stickers/GIFs, reply quotes, reactions row, Seen/Sent read receipts)
- * - Inline Translate Chip (`rpc("aiAssistant", { task: "translate", text })`) + Translated text card
- * - AI Reply Suggestions bar (`rpc("aiAssistant", { task: "reply", text })`) above the composer
- * - Rich Composer with Reply-to preview bar, Schedule message sheet, Translate outgoing draft, Image upload,
- *   Sticker/GIF picker tray, Voice Note recorder sheet, and Send button
- * - Offline outbox integration (`enqueueMessage` + `listQueuedMessages` from `@/lib/offline-queue`) showing `"Sending…"` pending state
- * - Realtime via Module 1 SSE (`useSSEListener`) — ZERO timer polling!
- * - Wired to exact RPCs: `getRoom`, `getOlderMessages`, `sendMessage`, `toggleMessageReaction`, `deleteMessage`, `aiAssistant`
+ * One conversation (DM, group, or live room) in the new look: header with face and status, white / gradient
+ * bubbles, the comment-bar style input, "is typing…", "Seen" under your last DM message, and a banner to accept or
+ * decline a message request. Reactions, replies, edit / delete, photos, clips, voice notes, stickers, search, calls,
+ * watch-together and invites all live here.
  */
-export default function ChatThreadScreen() {
+export default function ChatRoom() {
   const theme = useTheme();
-  const insets = useSafeAreaInsets();
+  const { roomId: roomParam } = useLocalSearchParams<{ roomId: string }>();
+  const roomId = Number(roomParam);
   const queryClient = useQueryClient();
-  const listRef = useRef<FlatList<TimelineItem>>(null);
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+  // New messages arrive by asking the server again every few seconds while this screen is open.
+  const room = useQuery({ queryKey: ["room", roomId], queryFn: () => api.room(roomId), enabled: Number.isFinite(roomId), refetchInterval: 4000 });
+  // The chat list knows extra things about the room: online, verified, message request…
+  const overview = useQuery({ queryKey: ["chatsOverview"], queryFn: api.chatsOverview, staleTime: 15_000 });
+  const extra = overview.data?.rooms.find((r) => r.id === roomId);
+  const isDm = room.data?.room.kind === "dm";
+  const typing = useQuery({ queryKey: ["typing", roomId], queryFn: () => api.typingIn(roomId), enabled: Number.isFinite(roomId), refetchInterval: 3000 });
+  const receipts = useQuery({ queryKey: ["receipts", roomId], queryFn: () => api.roomReceipts(roomId), enabled: isDm, refetchInterval: 5000 });
 
-  const { roomId: rawRoomParam } = useLocalSearchParams<{ roomId: string }>();
-  const roomId = Number(rawRoomParam);
-
-  const [draft, setDraft] = useState("");
-  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
-  const [selectedMessage, setSelectedMessage] = useState<ChatMessage | null>(
-    null,
-  );
-  const [highlightedId, setHighlightedId] = useState<number | null>(null);
-  const [pinnedMessageId, setPinnedMessageId] = useState<number | null>(null);
-  const [translations, setTranslations] = useState<Record<number, string>>({});
-  const [translatingId, setTranslatingId] = useState<number | null>(null);
-  const [translatingDraft, setTranslatingDraft] = useState(false);
-
-  // Composer trays & modals
-  const [stickerTrayOpen, setStickerTrayOpen] = useState(false);
-  const [voiceSheetOpen, setVoiceSheetOpen] = useState(false);
-  const [scheduleSheetOpen, setScheduleSheetOpen] = useState(false);
-  const [scheduleTimeLabel, setScheduleTimeLabel] = useState("Tonight · 8:00 PM");
-  const [scheduledDrafts, setScheduledDrafts] = useState<ScheduledDraftItem[]>(
-    [],
-  );
-  const [roomMenuOpen, setRoomMenuOpen] = useState(false);
-  const [reportTarget, setReportTarget] = useState<ReportTarget | null>(null);
-
-  // Pagination & offline queue state
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [hasMoreOlder, setHasMoreOlder] = useState(true);
+  const [text, setText] = useState("");
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  const [editing, setEditing] = useState<ChatMessage | null>(null);
+  const [selected, setSelected] = useState<ChatMessage | null>(null);
+  const [report, setReport] = useState<ReportTarget | null>(null);
+  const [sheet, setSheet] = useState<null | "settings" | "attach" | "stickers" | "search">(null);
   const [sending, setSending] = useState(false);
-  const [queuedItems, setQueuedItems] = useState<QueuedMessage[]>([]);
+  const [answering, setAnswering] = useState(false);
+  const [highlight, setHighlight] = useState<number | null>(null);
+  const voice = useVoiceRecorder();
+  const list = useRef<FlatList<ChatMessage>>(null);
 
-  const lastTypingSentAt = useRef<number>(0);
+  const messages = room.data?.messages;
+  const byId = useMemo(() => new Map((messages ?? []).map((m) => [m.id, m])), [messages]);
+  const newestFirst = useMemo(() => [...(messages ?? [])].reverse(), [messages]);
+  const myId = me.data?.profile.userId;
+  const newestId = newestFirst[0]?.id ?? 0;
 
-  const meQuery = useQuery({ queryKey: ["me"], queryFn: api.me });
-  const myProfile = meQuery.data?.profile;
-  const myUserId = myProfile?.userId ?? "me";
-
-  // 1. Primary Room Query wired to `rpc("getRoom", { roomId })` (`api.room` fallback) — NO polling timers!
-  const roomQuery = useQuery({
-    queryKey: ["room", roomId],
-    enabled: Number.isFinite(roomId) && roomId > 0,
-    queryFn: async (): Promise<RoomPageData> => {
-      try {
-        const res = await rpc<RoomPageData>("getRoom", { roomId });
-        if (res && res.room && Array.isArray(res.messages)) {
-          return res;
-        }
-      } catch {
-        // Fallback to api.room wrapper
-      }
-      return (await api.room(roomId)) as RoomPageData;
-    },
-  });
-
-  // 2. Typing & Read Receipts caches (updated in real time by `sse.ts`)
-  const typingQuery = useQuery({
-    queryKey: ["typing", roomId],
-    queryFn: () => api.typingInRoom(roomId),
-    enabled: Number.isFinite(roomId) && roomId > 0,
-    staleTime: Infinity,
-  });
-
-  const receiptsQuery = useQuery({
-    queryKey: ["receipts", roomId],
-    queryFn: () => api.roomReceipts(roomId),
-    enabled: Number.isFinite(roomId) && roomId > 0,
-    staleTime: Infinity,
-  });
-
-  // Load any pending offline messages for this room
-  const refreshOfflineQueue = useCallback(async () => {
-    if (!myUserId || !Number.isFinite(roomId)) return;
-    try {
-      const allQueued = await listQueuedMessages(myUserId);
-      setQueuedItems(allQueued.filter((q) => q.roomId === roomId));
-    } catch {
-      setQueuedItems([]);
-    }
-  }, [myUserId, roomId]);
-
+  // Tell the server what we've read (not for message requests: the sender shouldn't see "Seen" before you accept).
+  const markedRef = useRef(0);
   useEffect(() => {
-    void refreshOfflineQueue();
-  }, [refreshOfflineQueue]);
+    if (!newestId || newestId <= markedRef.current || extra?.isRequest) return;
+    markedRef.current = newestId;
+    api
+      .markRoomRead(roomId, newestId)
+      .then(() => {
+        void queryClient.invalidateQueries({ queryKey: ["rooms"] });
+        void queryClient.invalidateQueries({ queryKey: ["chatsOverview"] });
+      })
+      .catch(() => undefined);
+  }, [newestId, roomId, extra?.isRequest, queryClient]);
 
-  const messages = roomQuery.data?.messages ?? [];
-  const roomInfo = roomQuery.data?.room;
-
-  // Automatically mark latest message as read when opening or receiving messages
-  const lastMarkedIdRef = useRef<number>(0);
-  useEffect(() => {
-    const newest = messages[messages.length - 1];
-    if (!newest || !Number.isFinite(roomId)) return;
-    if (newest.id <= lastMarkedIdRef.current) return;
-    lastMarkedIdRef.current = newest.id;
-    void api.markRoomRead(roomId, newest.id).catch(() => undefined);
-  }, [messages, roomId]);
-
-  // Listen to live SSE events for this room
-  useSSEListener((event) => {
-    if (event.roomId !== roomId) return;
-    if (
-      event.type === "chat.message" ||
-      event.type === "message.new" ||
-      event.type === "message"
-    ) {
-      void refreshOfflineQueue();
-      setTimeout(() => {
-        listRef.current?.scrollToEnd({ animated: true });
-      }, 90);
-    }
-  });
-
-  // 3. AI Reply Suggestions Bar wired to `rpc("aiAssistant", { task: "reply", text })`
-  const lastPeerMessage = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const m = messages[i];
-      if (m && m.author.userId !== myUserId && !m.deleted && m.body.trim()) {
-        return m;
-      }
-    }
-    return null;
-  }, [messages, myUserId]);
-
-  const aiReplySuggestionsQuery = useQuery({
-    queryKey: ["aiReplySuggestions", roomId, lastPeerMessage?.id ?? 0],
-    enabled: Boolean(lastPeerMessage),
-    staleTime: 120_000,
-    queryFn: async (): Promise<string[]> => {
-      const contextText = lastPeerMessage?.body ?? "";
-      const prompt = `Suggest 3 short, friendly, natural chat replies (under 8 words each, separated by " | ") to this message: "${previewText(contextText)}"`;
-      try {
-        const res = await rpc<AiAssistantRpcResult>("aiAssistant", {
-          task: "reply",
-          text: prompt,
-        });
-        const parts = res.text
-          .split("|")
-          .map((s) => s.trim().replace(/^["'•\d.)\s-]+|["']$/g, ""))
-          .filter((s) => s.length >= 2 && s.length <= 64);
-        if (parts.length >= 2) return parts.slice(0, 3);
-      } catch {
-        try {
-          const fb = await platform.ai("reply", prompt);
-          const parts = fb.text
-            .split("|")
-            .map((s) => s.trim().replace(/^["'•\d.)\s-]+|["']$/g, ""))
-            .filter((s) => s.length >= 2 && s.length <= 64);
-          if (parts.length >= 2) return parts.slice(0, 3);
-        } catch {
-          // Use contextual defaults below
-        }
-      }
-      return [
-        "That’s awesome! 🔥",
-        "Wait, tell me more! 👀",
-        "100% agree with you ✨",
-      ];
-    },
-  });
-
-  /**
-   * Loads older message history via the verified `rpc("getOlderMessages", { roomId, beforeId })`.
-   */
-  const handleLoadOlderMessages = async () => {
-    if (loadingOlder || !hasMoreOlder || messages.length === 0) return;
-    const oldestId = messages[0]?.id;
-    if (!oldestId || oldestId <= 0) return;
-
-    setLoadingOlder(true);
-    try {
-      let olderList: ChatMessage[] = [];
-      try {
-        const res = await rpc<GetOlderMessagesRpcResult | ChatMessage[]>(
-          "getOlderMessages",
-          {
-            roomId,
-            beforeId: oldestId,
-          },
-        );
-        if (Array.isArray(res)) {
-          olderList = res;
-        } else if (res && Array.isArray(res.messages)) {
-          olderList = res.messages;
-        } else if (res && Array.isArray(res.items)) {
-          olderList = res.items;
-        }
-      } catch {
-        const fb = await api.olderMessages(roomId, oldestId);
-        olderList = fb.messages ?? [];
-      }
-
-      if (olderList.length === 0) {
-        setHasMoreOlder(false);
-        return;
-      }
-
-      queryClient.setQueryData<RoomPageData>(["room", roomId], (old) => {
-        if (!old) return old;
-        const existingIds = new Set(old.messages.map((m) => m.id));
-        const uniqueOlder = olderList.filter((m) => !existingIds.has(m.id));
-        return {
-          ...old,
-          messages: [...uniqueOlder, ...old.messages],
-        };
-      });
-    } catch (err) {
-      showError(err, "Couldn't load older messages");
-    } finally {
-      setLoadingOlder(false);
+  // "I'm typing": sent at most every few seconds while there is text in the box.
+  const typingSent = useRef(0);
+  const onChangeText = (value: string) => {
+    setText(value);
+    if (value.trim() && !editing && Date.now() - typingSent.current > TYPING_EVERY_MS) {
+      typingSent.current = Date.now();
+      api.setTyping(roomId).catch(() => undefined);
     }
   };
 
-  /**
-   * Sends a message (text, sticker, image, or voice note) via the verified `rpc("sendMessage", ...)`
-   * with optimistic cache insertion and automatic fallback to `@/lib/offline-queue` when offline.
-   */
-  const handleSendPayload = async (options: {
-    body: string;
-    image?: string;
-    audio?: string;
-    mediaKind?: "image" | "audio" | "video" | null;
-  }) => {
-    const cleanBody = options.body.trim();
-    if (!cleanBody && !options.image && !options.audio) return;
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["room", roomId] });
+    void queryClient.invalidateQueries({ queryKey: ["rooms"] });
+    void queryClient.invalidateQueries({ queryKey: ["chatsOverview"] });
+  };
 
-    const replyTarget = replyingTo;
-    setReplyingTo(null);
-    if (!options.image && !options.audio) {
-      setDraft("");
-    }
-
-    const tempId = -Date.now();
-    const myChip: UserChip = {
-      userId: myUserId,
-      handle: myProfile?.handle ?? "me",
-      nickname: myProfile?.displayName ?? "You",
-      hue: myProfile?.avatarHue ?? 265,
-      avatarV: myProfile?.avatarVersion ?? 0,
-      role: "member",
-    };
-
-    const optimisticMessage: ChatMessage = {
-      id: tempId,
-      roomId,
-      author: myChip,
-      body: cleanBody,
-      createdAt: new Date().toISOString(),
-      editedAt: null,
-      deleted: false,
-      replyTo: replyTarget?.id ?? null,
-      mediaKind:
-        options.mediaKind ??
-        (options.image ? "image" : options.audio ? "audio" : null),
-      reactions: [],
-      bubbleStyle: "soft",
-      bubbleHue: myChip.hue,
-    };
-
-    queryClient.setQueryData<RoomPageData>(["room", roomId], (old) =>
-      old ? { ...old, messages: [...old.messages, optimisticMessage] } : old,
-    );
-
-    setTimeout(() => {
-      listRef.current?.scrollToEnd({ animated: true });
-    }, 60);
-
+  const submit = async (media?: Media) => {
+    const body = text.trim();
+    if (sending || (!body && !media)) return;
     setSending(true);
+    let queued = false;
+    // Allocate the dedup tag before the first attempt so a retry after a lost
+    // response can never post a second copy (M2).
+    const clientTag = newClientTag();
+    const userId = me.data?.profile?.userId ?? null;
     try {
-      const rpcInput = {
-        roomId,
-        body: cleanBody,
-        ...(replyTarget ? { replyTo: replyTarget.id } : {}),
-        ...(options.image ? { image: options.image } : {}),
-        ...(options.audio ? { audio: options.audio } : {}),
-        clientTag: `msg-${Date.now()}`,
-      };
-
-      let sentResult: SendMessageRpcResult | null = null;
       try {
-        sentResult = await rpc<SendMessageRpcResult>("sendMessage", rpcInput);
-      } catch {
-        sentResult = (await api.send(rpcInput)) as SendMessageRpcResult;
+        tellIfHeld(editing ? await api.editMessage(roomId, editing.id, body) : await api.send({ roomId, body, replyTo: replyTo?.id ?? null, media, clientTag }));
+      } catch (error) {
+        // Queue ONLY transient network failures. Validation, moderation,
+        // permission and auth errors are permanent — retrying them is wrong (M2).
+        const isNetworkError = error instanceof Error && (error as { status?: number }).status === 0;
+        if (!editing && !media && isNetworkError && userId) {
+          await enqueueMessage(userId, { roomId, body, replyTo: replyTo?.id ?? null, clientTag });
+          queued = true;
+          // Clear the composer: the words are safe in the queue now.
+          setText("");
+          setReplyTo(null);
+          showError(error, "No connection — it will send when you're back online");
+        } else {
+          showError(error, "Message not sent");
+        }
+        throw error;
       }
-
-      const realId =
-        sentResult?.id ??
-        sentResult?.messageId ??
-        sentResult?.message?.id ??
-        null;
-
-      if (realId !== null) {
-        queryClient.setQueryData<RoomPageData>(["room", roomId], (old) => {
-          if (!old) return old;
-          const alreadyHasReal = old.messages.some((m) => m.id === realId);
-          return {
-            ...old,
-            messages: alreadyHasReal
-              ? old.messages.filter((m) => m.id !== tempId)
-              : old.messages.map((m) =>
-                  m.id === tempId
-                    ? sentResult?.message ?? { ...m, id: realId }
-                    : m,
-                ),
-          };
-        });
-      } else {
-        void roomQuery.refetch();
-      }
-      haptic.tap();
+      setText("");
+      setReplyTo(null);
+      setEditing(null);
+      typingSent.current = 0;
+      await refresh();
     } catch {
-      // Network offline -> enqueue in durable offline outbox
-      try {
-        await enqueueMessage(myUserId, {
-          roomId,
-          body: cleanBody,
-          ...(replyTarget ? { replyTo: replyTarget.id } : {}),
-          ...(options.image ? { image: options.image } : {}),
-          ...(options.audio ? { audio: options.audio } : {}),
-        });
-        await refreshOfflineQueue();
-        notify(
-          "Queued for delivery 📡",
-          "You’re offline. Your message will send automatically as soon as connection returns.",
-        );
-      } catch (queueErr) {
-        showError(queueErr, "Couldn't send message");
-      }
+      if (queued) return; // already reported with the offline explanation
+      showError(new Error("Message not sent"), "Message not sent");
     } finally {
       setSending(false);
     }
   };
 
-  /**
-   * Toggles an emoji reaction on a message via the verified `rpc("toggleMessageReaction", { messageId, emoji })`.
-   */
-  const handleToggleReaction = async (messageId: number, emoji: string) => {
-    if (messageId <= 0) return;
-    haptic.pop();
-
-    queryClient.setQueryData<RoomPageData>(["room", roomId], (old) => {
-      if (!old) return old;
-      return {
-        ...old,
-        messages: old.messages.map((m) => {
-          if (m.id !== messageId) return m;
-          const existing = m.reactions.find((r) => r.emoji === emoji);
-          const nextReactions = existing
-            ? existing.mine
-              ? m.reactions
-                  .map((r) =>
-                    r.emoji === emoji
-                      ? { ...r, count: r.count - 1, mine: false }
-                      : r,
-                  )
-                  .filter((r) => r.count > 0)
-              : m.reactions.map((r) =>
-                  r.emoji === emoji
-                    ? { ...r, count: r.count + 1, mine: true }
-                    : r,
-                )
-            : [...m.reactions, { emoji, count: 1, mine: true }];
-          return { ...m, reactions: nextReactions };
-        }),
-      };
-    });
-
+  const sendSticker = async (id: string) => {
+    setSheet(null);
+    if (sending) return;
+    setSending(true);
     try {
-      await rpc("toggleMessageReaction", { messageId, emoji });
-    } catch {
-      await api.react(messageId, emoji).catch(() => undefined);
+      await api.send({ roomId, body: stickerToken(id), replyTo: replyTo?.id ?? null });
+      setReplyTo(null);
+      await refresh();
+    } catch (error) {
+      showError(error, "Sticker not sent");
+    } finally {
+      setSending(false);
     }
   };
 
-  /**
-   * Deletes a message via the verified `rpc("deleteMessage", { messageId })`.
-   */
-  const handleDeleteMessage = async (message: ChatMessage) => {
-    const ok = await confirmAction(
-      "Delete this message?",
-      "It will be marked as deleted for everyone in this conversation.",
-      "Delete",
-      true,
-    );
-    if (!ok) return;
-
-    haptic.tap();
-    queryClient.setQueryData<RoomPageData>(["room", roomId], (old) => {
-      if (!old) return old;
-      return {
-        ...old,
-        messages: old.messages.map((m) =>
-          m.id === message.id ? { ...m, deleted: true, body: "" } : m,
-        ),
-      };
-    });
-
+  const attach = async (kind: "photo" | "camera" | "video") => {
+    setSheet(null);
     try {
-      await rpc("deleteMessage", { messageId: message.id });
-    } catch {
-      await api.deleteMessage(message.id).catch(() => undefined);
+      if (kind === "video") {
+        const dataUrl = await pickVideo("library");
+        if (dataUrl) await submit({ kind: "video", dataUrl });
+      } else {
+        const dataUrl = await pickPhoto(kind === "camera" ? "camera" : "library");
+        if (dataUrl) await submit({ kind: "image", dataUrl });
+      }
+    } catch (error) {
+      showError(error, "Couldn't attach that");
     }
   };
 
-  /**
-   * Translates a message in-place via the verified `rpc("aiAssistant", { task: "translate", text })`.
-   */
-  const handleTranslateMessage = async (message: ChatMessage) => {
-    const clean = previewText(message.body).trim();
-    if (!clean || translatingId === message.id) return;
-
-    if (translations[message.id]) {
-      setTranslations((prev) => {
-        const next = { ...prev };
-        delete next[message.id];
-        return next;
-      });
-      return;
-    }
-
-    setTranslatingId(message.id);
+  const toggleRecording = async () => {
     try {
-      const prompt = `Translate this chat message into clear, natural English (or if already in English, provide a natural Spanish/Japanese fandom translation): "${clean}"`;
-      let translatedText = "";
-      try {
-        const res = await rpc<AiAssistantRpcResult>("aiAssistant", {
-          task: "translate",
-          text: prompt,
+      if (voice.isRecording) {
+        const dataUrl = await voice.stop();
+        if (dataUrl) await submit({ kind: "audio", dataUrl });
+      } else {
+        await voice.start((dataUrl) => {
+          if (dataUrl) void submit({ kind: "audio", dataUrl });
         });
-        translatedText = res.text.trim();
-      } catch {
-        const fb = await platform.ai("translate", prompt);
-        translatedText = fb.text.trim();
       }
-      if (translatedText) {
-        setTranslations((prev) => ({
-          ...prev,
-          [message.id]: translatedText,
-        }));
-        haptic.success();
-      }
-    } catch (err) {
-      showError(err, "Couldn't translate message");
-    } finally {
-      setTranslatingId(null);
+    } catch (error) {
+      await voice.cancel();
+      showError(error, "Voice message failed");
     }
   };
 
-  /**
-   * Translates the user's outgoing draft in the composer via `rpc("aiAssistant", { task: "translate", text })`.
-   */
-  const handleTranslateOutgoingDraft = async () => {
-    const clean = draft.trim();
-    if (!clean || translatingDraft) return;
-    setTranslatingDraft(true);
+  const react = async (message: ChatMessage, emoji: string) => {
+    setSelected(null);
     try {
-      const res = await rpc<AiAssistantRpcResult>("aiAssistant", {
-        task: "translate",
-        text: `Translate this outgoing chat message naturally: "${clean}"`,
-      });
-      if (res.text.trim()) {
-        setDraft(res.text.trim());
-        haptic.success();
-      }
-    } catch {
-      try {
-        const fb = await platform.ai("translate", clean);
-        if (fb.text.trim()) setDraft(fb.text.trim());
-      } catch (err) {
-        showError(err, "Couldn't translate draft");
-      }
-    } finally {
-      setTranslatingDraft(false);
+      await api.react(roomId, message.id, emoji);
+      await refresh();
+    } catch (error) {
+      showError(error);
     }
   };
 
-  const handlePickAndSendImage = async () => {
-    try {
-      const imageBase64 = await pickPhoto("library", 1_400_000);
-      if (!imageBase64) return;
-      await handleSendPayload({
-        body: draft.trim(),
-        image: imageBase64,
-        mediaKind: "image",
-      });
-    } catch (err) {
-      showError(err, "Couldn't attach image");
-    }
-  };
-
-  const handleSendVoiceNotePreset = async (
-    preset: (typeof VOICE_NOTE_PRESETS)[number],
-  ) => {
-    setVoiceSheetOpen(false);
-    await handleSendPayload({
-      body: preset.caption,
-      mediaKind: "audio",
-    });
-  };
-
-  const handleScheduleMessage = () => {
-    const clean = draft.trim();
-    if (!clean) return;
-    haptic.success();
-    setScheduledDrafts((prev) => [
-      ...prev,
-      {
-        id: `sched-${Date.now()}`,
-        body: clean,
-        scheduledForLabel: scheduleTimeLabel,
-      },
+  const remove = (message: ChatMessage) => {
+    setSelected(null);
+    Alert.alert("Delete this message?", "This can't be undone.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void api.deleteMessage(roomId, message.id).then(refresh, showError) },
     ]);
-    setDraft("");
-    setScheduleSheetOpen(false);
-    notify(
-      "Message Scheduled 🕒",
-      `Queued for ${scheduleTimeLabel}. Tap "Send Now" on the banner anytime.`,
-    );
   };
 
-  const handleDraftChange = (text: string) => {
-    setDraft(text);
-    const now = Date.now();
-    if (text.trim().length > 0 && now - lastTypingSentAt.current > 3_500) {
-      lastTypingSentAt.current = now;
-      void api.sendTyping(roomId).catch(() => undefined);
-    }
-  };
-
-  // Resolve pinned message
-  const activePinnedId = pinnedMessageId ?? roomInfo?.pinnedMessageId ?? null;
-  const pinnedMessage = useMemo(() => {
-    if (activePinnedId) {
-      return messages.find((m) => m.id === activePinnedId) ?? null;
-    }
-    return messages[0] ?? null;
-  }, [messages, activePinnedId]);
-
-  const messageById = useMemo(() => {
-    const map = new Map<number, ChatMessage>();
-    for (const m of messages) {
-      map.set(m.id, m);
-    }
-    return map;
-  }, [messages]);
-
-  // Compute read receipt for the user's newest message
-  const lastMineMessageId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]?.author.userId === myUserId) {
-        return messages[i]!.id;
+  const answer = async (accept: boolean) => {
+    setAnswering(true);
+    try {
+      if (accept) await api.acceptMessageRequest(roomId);
+      else await api.declineMessageRequest(roomId);
+      void queryClient.invalidateQueries({ queryKey: ["chatsOverview"] });
+      void queryClient.invalidateQueries({ queryKey: ["rooms"] });
+      if (!accept) {
+        if (router.canGoBack()) router.back();
+        else router.replace("/chats");
       }
-    }
-    return null;
-  }, [messages, myUserId]);
-
-  const highestSeenMessageId = useMemo(() => {
-    const seenBy = receiptsQuery.data?.seenBy ?? [];
-    let maxId = 0;
-    for (const entry of seenBy) {
-      if (entry.userId !== myUserId && entry.lastReadId > maxId) {
-        maxId = entry.lastReadId;
-      }
-    }
-    return maxId;
-  }, [receiptsQuery.data?.seenBy, myUserId]);
-
-  // Build flat timeline with Date Dividers + Messages + Queued Offline Messages
-  const timelineItems = useMemo((): TimelineItem[] => {
-    const combined: (ChatMessage & { _pending?: boolean })[] = [...messages];
-
-    for (const q of queuedItems) {
-      combined.push({
-        id: -q.queuedAt,
-        roomId,
-        author: {
-          userId: myUserId,
-          handle: myProfile?.handle ?? "me",
-          nickname: myProfile?.displayName ?? "You",
-          hue: myProfile?.avatarHue ?? 265,
-          avatarV: myProfile?.avatarVersion ?? 0,
-          role: "member",
-        },
-        body: q.body,
-        createdAt: new Date(q.queuedAt).toISOString(),
-        editedAt: null,
-        deleted: false,
-        replyTo: q.replyTo ?? null,
-        mediaKind: q.image ? "image" : q.audio ? "audio" : null,
-        reactions: [],
-        bubbleStyle: "soft",
-        bubbleHue: myProfile?.avatarHue ?? 265,
-        _pending: true,
-      });
-    }
-
-    const out: TimelineItem[] = [];
-    let lastDayKey = "";
-
-    for (let i = 0; i < combined.length; i += 1) {
-      const curr = combined[i]!;
-      const prev = i > 0 ? combined[i - 1] : null;
-      const next = i < combined.length - 1 ? combined[i + 1] : null;
-
-      const dKey = dayBucketKey(curr.createdAt);
-      if (dKey !== lastDayKey) {
-        lastDayKey = dKey;
-        out.push({
-          kind: "divider",
-          id: `div-${dKey}-${curr.id}`,
-          label: formatDateDivider(curr.createdAt),
-        });
-      }
-
-      const sameAuthorAsPrev =
-        prev !== null &&
-        prev.author.userId === curr.author.userId &&
-        dayBucketKey(prev.createdAt) === dKey;
-      const sameAuthorAsNext =
-        next !== null &&
-        next.author.userId === curr.author.userId &&
-        dayBucketKey(next.createdAt) === dKey;
-
-      const isMine = curr.author.userId === myUserId;
-      let receipt: string | null = null;
-      if (isMine) {
-        if (curr._pending || curr.id < 0) {
-          receipt = "Sending…";
-        } else if (curr.id === lastMineMessageId) {
-          receipt = highestSeenMessageId >= curr.id ? "Seen" : "Sent";
-        }
-      }
-
-      out.push({
-        kind: "message",
-        id: `msg-${curr.id}`,
-        message: curr,
-        pending: curr._pending,
-        showName: !isMine && !sameAuthorAsPrev,
-        showAvatar: !isMine && !sameAuthorAsNext,
-        showTime: !sameAuthorAsNext,
-        receipt,
-      });
-    }
-
-    return out;
-  }, [
-    messages,
-    queuedItems,
-    roomId,
-    myUserId,
-    myProfile,
-    lastMineMessageId,
-    highestSeenMessageId,
-  ]);
-
-  const jumpToMessage = (targetMsgId: number) => {
-    const idx = timelineItems.findIndex(
-      (item) => item.kind === "message" && item.message.id === targetMsgId,
-    );
-    if (idx >= 0) {
-      setHighlightedId(targetMsgId);
-      listRef.current?.scrollToIndex({
-        index: idx,
-        animated: true,
-        viewPosition: 0.4,
-      });
-      setTimeout(() => setHighlightedId(null), 1_800);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnswering(false);
     }
   };
 
-  if (roomQuery.isPending && !roomQuery.data) {
-    return <Loading label="Opening conversation…" />;
-  }
-  if (roomQuery.isError || !roomInfo) {
+  /** Jumps to a search result when it's in the loaded messages. */
+  const jumpTo = (id: number) => {
+    setSheet(null);
+    const index = newestFirst.findIndex((m) => m.id === id);
+    if (index < 0) return;
+    setHighlight(id);
+    setTimeout(() => setHighlight((h) => (h === id ? null : h)), 2500);
+    list.current?.scrollToIndex({ index, viewPosition: 0.5, animated: true });
+  };
+
+  const goBack = () => (router.canGoBack() ? router.back() : router.replace("/chats"));
+
+  if (room.isPending) return <Loading />;
+  if (room.isError || !room.data) {
     return (
-      <ErrorState
-        error={roomQuery.error}
-        onRetry={() => void roomQuery.refetch()}
-      />
+      <View style={{ flex: 1, backgroundColor: theme.bg }}>
+        <ChatHeader person={{ name: "?", hue: 260 }} title="Chat" onBack={goBack} actions={[]} />
+        <ErrorState error={room.error} onRetry={() => void room.refetch()} />
+      </View>
     );
   }
 
-  const isDm = roomInfo.kind === "dm";
-  const typingNames = (typingQuery.data?.names ?? []).filter(Boolean);
-  const peerOnline = Boolean(roomInfo.peerOnline);
-  const participantCount = roomQuery.data?.participants.length ?? 2;
-
-  const headerMenuItems: MenuItem[] = [
-    {
-      key: "call",
-      label: "Start Voice or Video Call",
-      icon: "call-outline",
-      tone: "green",
-      onPress: () => router.push(`/call/${roomId}`),
-    },
-    {
-      key: "watch",
-      label: "Start Synced Watch Party",
-      icon: "film-outline",
-      tone: "violet",
-      onPress: () => router.push(`/chat/watch/${roomId}`),
-    },
-    {
-      key: "stage",
-      label: "Open Live Stage Room",
-      icon: "radio-outline",
-      tone: "pink",
-      onPress: () => router.push(`/live/${roomId}`),
-    },
-    ...(roomInfo.peerHandle
-      ? [
-          {
-            key: "profile",
-            label: `View @${roomInfo.peerHandle}'s Profile`,
-            icon: "person-outline" as const,
-            tone: "blue" as const,
-            onPress: () => router.push(`/profile/${roomInfo.peerHandle}`),
-          },
-        ]
-      : []),
-    ...(!isDm
-      ? [
-          {
-            key: "groupSettings",
-            label: "Group Room Settings",
-            icon: "settings-outline" as const,
-            tone: "orange" as const,
-            onPress: () => router.push(`/groups/${roomId}`),
-          },
-        ]
-      : []),
-    {
-      key: "report",
-      label: "Report Conversation",
-      icon: "flag-outline",
-      destructive: true,
-      onPress: () =>
-        setReportTarget({
-          targetType: "room",
-          targetId: String(roomId),
-          label: roomInfo.name,
-        }),
-    },
-  ];
-
-  const messageMenuItems: MenuItem[] = selectedMessage
-    ? [
-        {
-          key: "reply",
-          label: "Reply to message",
-          icon: "arrow-undo-outline",
-          tone: "violet",
-          onPress: () => setReplyingTo(selectedMessage),
-        },
-        {
-          key: "translate",
-          label: translations[selectedMessage.id]
-            ? "Hide translation"
-            : "Translate with AI ✨",
-          icon: "language-outline",
-          tone: "blue",
-          onPress: () => void handleTranslateMessage(selectedMessage),
-        },
-        {
-          key: "pin",
-          label:
-            pinnedMessageId === selectedMessage.id
-              ? "Unpin message"
-              : "Pin message to top",
-          icon: "pin-outline",
-          tone: "orange",
-          onPress: () => {
-            setPinnedMessageId(
-              pinnedMessageId === selectedMessage.id
-                ? null
-                : selectedMessage.id,
-            );
-            haptic.tap();
-          },
-        },
-        {
-          key: "copy",
-          label: "Copy message text",
-          icon: "copy-outline",
-          tone: "green",
-          onPress: () => {
-            void Clipboard.setStringAsync(previewText(selectedMessage.body));
-            notify("Copied", "Message text copied to clipboard.");
-          },
-        },
-        ...(selectedMessage.author.userId === myUserId
-          ? [
-              {
-                key: "delete",
-                label: "Delete message",
-                icon: "trash-outline" as const,
-                destructive: true,
-                onPress: () => void handleDeleteMessage(selectedMessage),
-              },
-            ]
-          : [
-              {
-                key: "reportMsg",
-                label: "Report message",
-                icon: "flag-outline" as const,
-                destructive: true,
-                onPress: () =>
-                  setReportTarget({
-                    targetType: "message",
-                    targetId: String(selectedMessage.id),
-                    label: `${selectedMessage.author.nickname}'s message`,
-                  }),
-              },
-            ]),
-      ]
-    : [];
+  const info = room.data.room;
+  const title = roomTitle({ ...info, communityName: extra?.communityName });
+  const typingNames = (typing.data?.names ?? []).filter((_, i) => typing.data?.userIds[i] !== myId);
+  const mineSelected = !!selected && selected.author.userId === myId;
+  // "Seen" under my newest message when the other person has read up to it (DMs only, when they share receipts).
+  const myLast = newestFirst.find((m) => m.author.userId === myId && !m.deleted);
+  const seen = !!myLast && (receipts.data?.seenBy ?? []).some((s) => s.userId !== myId && s.lastReadId >= myLast.id);
+  const subtitle = typingNames.length
+    ? isDm
+      ? "typing…"
+      : `${typingNames[0]}${typingNames.length > 1 ? ` +${typingNames.length - 1}` : ""} typing…`
+    : isDm
+      ? extra?.peerOnline
+        ? "Online"
+        : info.peerHandle
+          ? `@${info.peerHandle}`
+          : undefined
+      : info.kind === "voice"
+        ? `Live room${room.data.voices.length ? ` · ${room.data.voices.length} in the call` : ""}`
+        : [extra?.communityName, room.data.participants.length ? `${room.data.participants.length} people` : null].filter(Boolean).join(" · ") || undefined;
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      {/* ── CHAT HEADER (Mockup 4 Right Pane) ── */}
-      <View
-        style={[
-          styles.headerBar,
-          {
-            paddingTop: insets.top + 8,
-            backgroundColor: theme.surface,
-            borderBottomColor: theme.border,
-          },
-          shadow.card,
+    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <ChatHeader
+        person={roomPerson(info)}
+        title={title}
+        verified={isDm && extra?.peerVerified}
+        online={isDm ? !!extra?.peerOnline : undefined}
+        subtitle={subtitle}
+        subtitleTone={typingNames.length ? "accent" : isDm && extra?.peerOnline ? "green" : "muted"}
+        onBack={goBack}
+        onPressTitle={isDm && info.peerHandle ? () => router.push(`/profile/${info.peerHandle}`) : undefined}
+        actions={[
+          { icon: "search-outline", label: "Search messages", onPress: () => setSheet("search") },
+          { icon: "call-outline", label: "Start or join a call", onPress: () => router.push(`/call/${roomId}`) },
+          { icon: "ellipsis-horizontal", label: "Chat settings and invites", onPress: () => setSheet("settings") },
         ]}
-      >
-        <PressableScale
-          onPress={() =>
-            router.canGoBack() ? router.back() : router.replace("/chats")
-          }
-          accessibilityRole="button"
-          accessibilityLabel="Back to messages"
-          hitSlop={8}
-          scaleTo={0.9}
-          style={styles.backIconBtn}
-        >
-          <Ionicons name="chevron-back" size={24} color={theme.ink} />
-        </PressableScale>
+      />
 
-        <PressableScale
-          onPress={() => {
-            if (roomInfo.peerHandle) {
-              router.push(`/profile/${roomInfo.peerHandle}`);
-            } else if (!isDm) {
-              router.push(`/groups/${roomId}`);
-            }
-          }}
-          accessibilityRole="button"
-          accessibilityLabel={`${roomInfo.name} details`}
-          scaleTo={0.98}
-          style={styles.headerIdentityRow}
-        >
-          <PersonAvatar
-            person={{
-              name: roomInfo.name,
-              hue: roomInfo.hue ?? 265,
-              userId: roomInfo.peerUserId ?? undefined,
-            }}
-            size={40}
-            online={isDm ? peerOnline : true}
-          />
-          <View style={{ flex: 1, gap: 1 }}>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-              <Txt
-                numberOfLines={1}
-                style={{
-                  fontFamily: font.heavy,
-                  fontSize: 15.5,
-                  lineHeight: 20,
-                  color: theme.ink,
-                  flexShrink: 1,
-                }}
-              >
-                {roomInfo.name}
-              </Txt>
-              {roomInfo.peerVerified ? <VerifiedTick size={14} /> : null}
-            </View>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor:
-                      typingNames.length > 0 || peerOnline || !isDm
-                        ? theme.ok
-                        : theme.subtle,
-                  },
-                ]}
-              />
-              <Txt
-                numberOfLines={1}
-                style={{
-                  fontFamily:
-                    typingNames.length > 0 ? font.bold : font.semibold,
-                  fontSize: 11.5,
-                  lineHeight: 15,
-                  color:
-                    typingNames.length > 0
-                      ? theme.violet
-                      : peerOnline || !isDm
-                        ? theme.ok
-                        : theme.muted,
-                }}
-              >
-                {typingNames.length > 0
-                  ? `${typingNames.join(", ")} typing…`
-                  : isDm
-                    ? peerOnline
-                      ? "Active now"
-                      : "Offline"
-                    : `${participantCount} members active`}
-              </Txt>
+      <ChatContentTools roomId={roomId} myId={myId ?? ""} messages={messages ?? []}/>
+      {info.kind === "voice" || info.kind === "screening" ? <StageControlsV9 roomId={roomId} userId={myId ?? ""}/> : null}
+      {extra?.isRequest ? (
+        <View style={{ margin: 12, marginBottom: 0, padding: 14, gap: 10, borderRadius: radius.card, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+            <PersonAvatar person={roomPerson(info)} size={40} />
+            <View style={{ flex: 1 }}>
+              <Txt style={{ fontFamily: font.bold, fontSize: 14.5, lineHeight: 19, color: theme.ink }}>{`${title} wants to message you`}</Txt>
+              <Txt style={{ fontFamily: font.regular, fontSize: 12, lineHeight: 16, color: theme.muted }}>You don’t follow each other yet. They won’t know you’ve seen this until you accept or reply.</Txt>
             </View>
           </View>
-        </PressableScale>
-
-        {/* Call, Video/Watch Party & More Menu Buttons */}
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <PressableScale
-            onPress={() => router.push(`/call/${roomId}`)}
-            accessibilityRole="button"
-            accessibilityLabel="Start audio call"
-            scaleTo={0.9}
-            style={[
-              styles.headerActionCircle,
-              { backgroundColor: theme.tints.violet },
-            ]}
-          >
-            <Ionicons name="call" size={17} color={theme.violet} />
-          </PressableScale>
-
-          <PressableScale
-            onPress={() => router.push(`/call/${roomId}`)}
-            accessibilityRole="button"
-            accessibilityLabel="Start video call"
-            scaleTo={0.9}
-            style={[
-              styles.headerActionCircle,
-              { backgroundColor: theme.tints.pink },
-            ]}
-          >
-            <Ionicons name="videocam" size={18} color={theme.pink} />
-          </PressableScale>
-
-          <PressableScale
-            onPress={() => setRoomMenuOpen(true)}
-            accessibilityRole="button"
-            accessibilityLabel="Conversation menu"
-            scaleTo={0.9}
-            style={[
-              styles.headerActionCircle,
-              { backgroundColor: theme.surfaceAlt },
-            ]}
-          >
-            <Ionicons name="ellipsis-vertical" size={17} color={theme.ink} />
-          </PressableScale>
-        </View>
-      </View>
-
-      {/* ── PINNED MESSAGE BANNER (Mockup 4 Right Pane) ── */}
-      {pinnedMessage && !pinnedMessage.deleted ? (
-        <PressableScale
-          onPress={() => jumpToMessage(pinnedMessage.id)}
-          accessibilityRole="button"
-          accessibilityLabel={`Pinned message from ${pinnedMessage.author.nickname}: ${previewText(pinnedMessage.body)}`}
-          scaleTo={0.99}
-          style={[
-            styles.pinnedBanner,
-            {
-              backgroundColor: theme.surface,
-              borderBottomColor: theme.border,
-            },
-          ]}
-        >
-          <View
-            style={[styles.pinnedBarAccent, { backgroundColor: theme.violet }]}
-          />
-          <Ionicons name="pin" size={15} color={theme.violet} />
-          <View style={{ flex: 1 }}>
-            <Txt
-              style={{
-                fontFamily: font.heavy,
-                fontSize: 11,
-                color: theme.toneText.violet,
-              }}
-            >
-              Pinned Message · {pinnedMessage.author.nickname}
-            </Txt>
-            <Txt
-              numberOfLines={1}
-              style={{
-                fontFamily: font.regular,
-                fontSize: 12.5,
-                color: theme.ink,
-              }}
-            >
-              {previewText(pinnedMessage.body) || "Attachment"}
-            </Txt>
+          <View style={{ flexDirection: "row", gap: 8 }}>
+            <GradientButton label="Accept" icon="checkmark" busy={answering} onPress={() => void answer(true)} style={{ flex: 1 }} full />
+            <PressableScale onPress={() => void answer(false)} disabled={answering} accessibilityLabel="Decline message request" scaleTo={0.96} style={{ flex: 1, height: 36, borderRadius: radius.pill, borderWidth: 1, borderColor: theme.border, alignItems: "center", justifyContent: "center", backgroundColor: theme.surface }}>
+              <Txt style={{ fontFamily: font.bold, fontSize: 14, lineHeight: 18, color: theme.muted }}>Decline</Txt>
+            </PressableScale>
           </View>
-          <PressableScale
-            onPress={() => router.push(`/chat/watch/${roomId}`)}
+          <Pressable
+            onPress={() => setReport({ targetType: "message", targetId: String(newestFirst[0]?.id ?? ""), communityId: undefined, label: "message request" })}
             accessibilityRole="button"
-            accessibilityLabel="Open Watch Party"
-            scaleTo={0.94}
-            style={[
-              styles.watchPartyMiniPill,
-              { backgroundColor: theme.tints.violet },
-            ]}
+            accessibilityLabel="Report this request"
+            hitSlop={8}
+            style={{ alignSelf: "center" }}
           >
-            <Ionicons name="play-circle" size={13} color={theme.violet} />
-            <Txt
-              style={{
-                fontFamily: font.bold,
-                fontSize: 11,
-                color: theme.toneText.violet,
-              }}
-            >
-              Watch Party
-            </Txt>
-          </PressableScale>
-        </PressableScale>
-      ) : null}
-
-      {/* Scheduled Drafts Banner */}
-      {scheduledDrafts.length > 0 ? (
-        <View
-          style={[
-            styles.scheduledBanner,
-            {
-              backgroundColor: theme.surfaceAi,
-              borderBottomColor: theme.border,
-            },
-          ]}
-        >
-          <Ionicons name="time-outline" size={16} color={theme.violet} />
-          <Txt
-            numberOfLines={1}
-            style={{
-              flex: 1,
-              fontFamily: font.semibold,
-              fontSize: 12,
-              color: theme.ink,
-            }}
-          >
-            Scheduled ({scheduledDrafts[0]!.scheduledForLabel}): “
-            {scheduledDrafts[0]!.body}”
-          </Txt>
-          <PressableScale
-            onPress={() => {
-              const first = scheduledDrafts[0];
-              if (!first) return;
-              setScheduledDrafts((prev) => prev.slice(1));
-              void handleSendPayload({ body: first.body });
-            }}
-            accessibilityRole="button"
-            accessibilityLabel="Send scheduled message now"
-            scaleTo={0.94}
-            style={[styles.sendScheduledNowBtn, { backgroundColor: theme.violet }]}
-          >
-            <Txt
-              style={{
-                fontFamily: font.bold,
-                fontSize: 11,
-                color: "#FFFFFF",
-              }}
-            >
-              Send Now
-            </Txt>
-          </PressableScale>
+            <Txt style={{ fontFamily: font.semibold, fontSize: 12, lineHeight: 16, color: theme.danger }}>Report</Txt>
+          </Pressable>
         </View>
       ) : null}
+      {extra?.awaitingAccept ? <ChatBanner icon="paper-plane-outline" tone="blue" text={`Message request sent. ${title} will see it once they accept.`} /> : null}
 
-      {/* ── MESSAGE TIMELINE + COMPOSER ── */}
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-        <FlatList
-          ref={listRef}
-          data={timelineItems}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={{
-            paddingVertical: 10,
-            flexGrow: 1,
-          }}
-          onScrollToIndexFailed={() => undefined}
-          ListHeaderComponent={
-            messages.length >= 15 && hasMoreOlder ? (
-              <View style={{ alignItems: "center", paddingVertical: 8 }}>
-                <PressableScale
-                  onPress={() => void handleLoadOlderMessages()}
-                  disabled={loadingOlder}
-                  accessibilityRole="button"
-                  accessibilityLabel="Load earlier messages"
-                  scaleTo={0.95}
-                  style={[
-                    styles.loadOlderPill,
-                    {
-                      backgroundColor: theme.surface,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  {loadingOlder ? (
-                    <ActivityIndicator size="small" color={theme.violet} />
-                  ) : (
-                    <Ionicons
-                      name="time-outline"
-                      size={14}
-                      color={theme.violet}
-                    />
-                  )}
-                  <Txt
-                    style={{
-                      fontFamily: font.bold,
-                      fontSize: 12,
-                      color: theme.toneText.violet,
-                    }}
-                  >
-                    {loadingOlder
-                      ? "Loading older messages…"
-                      : "Load earlier messages"}
-                  </Txt>
-                </PressableScale>
-              </View>
-            ) : null
-          }
-          ListEmptyComponent={
-            <EmptyHint
-              emoji="👋"
-              title={`Say hi to ${roomInfo.name}!`}
-              text="Send a message, sticker, voice note, or tap an AI suggestion below to break the ice."
-              style={{ margin: 20 }}
-            />
-          }
-          renderItem={({ item }) => {
-            if (item.kind === "divider") {
-              return (
-                <View style={styles.dateDividerWrap}>
-                  <View
-                    style={[
-                      styles.dateDividerPill,
-                      {
-                        backgroundColor: theme.surfaceAlt,
-                        borderColor: theme.border,
-                      },
-                    ]}
-                  >
-                    <Txt
-                      style={{
-                        fontFamily: font.bold,
-                        fontSize: 11,
-                        color: theme.muted,
-                      }}
-                    >
-                      {item.label}
-                    </Txt>
-                  </View>
-                </View>
-              );
-            }
-
-            const msg = item.message;
-            const isMine = msg.author.userId === myUserId;
-            const repliedMsg =
-              msg.replyTo !== null ? messageById.get(msg.replyTo) : undefined;
-            const translatedText = translations[msg.id];
-            const isTranslating = translatingId === msg.id;
-
-            return (
-              <View>
-                <MessageBubble
-                  message={msg}
-                  mine={isMine}
-                  replyTo={repliedMsg}
-                  showName={item.showName}
-                  showAvatar={item.showAvatar}
-                  showTime={item.showTime}
-                  receipt={item.receipt}
-                  highlighted={highlightedId === msg.id}
-                  onLongPress={() => {
-                    haptic.pop();
-                    setSelectedMessage(msg);
-                  }}
-                  onOpenProfile={() =>
-                    router.push(`/profile/${msg.author.handle}`)
-                  }
-                  onReact={(emoji) => void handleToggleReaction(msg.id, emoji)}
-                  onReply={() => setReplyingTo(msg)}
-                  onTranslate={() => void handleTranslateMessage(msg)}
-                  onDelete={
-                    isMine ? () => void handleDeleteMessage(msg) : undefined
-                  }
-                  translatedText={translatedText}
-                  translating={isTranslating}
-                />
-
-                {/* Inline Translate Chip under peer messages (Mockup 4 Right Pane) */}
-                {!isMine &&
-                !msg.deleted &&
-                msg.body.trim().length > 0 &&
-                !translatedText ? (
-                  <View
-                    style={{
-                      paddingLeft: 52,
-                      paddingBottom: 4,
-                      flexDirection: "row",
-                    }}
-                  >
-                    <PressableScale
-                      onPress={() => void handleTranslateMessage(msg)}
-                      disabled={isTranslating}
-                      accessibilityRole="button"
-                      accessibilityLabel="Translate message with AI"
-                      scaleTo={0.95}
-                      style={[
-                        styles.translateInlineChip,
-                        {
-                          backgroundColor: theme.surface,
-                          borderColor: theme.border,
-                        },
-                      ]}
-                    >
-                      <Ionicons
-                        name="language-outline"
-                        size={12}
-                        color={theme.violet}
-                      />
-                      <Txt
-                        style={{
-                          fontFamily: font.bold,
-                          fontSize: 11,
-                          color: theme.toneText.violet,
-                        }}
-                      >
-                        {isTranslating ? "Translating…" : "Translate ✨"}
-                      </Txt>
-                    </PressableScale>
-                  </View>
-                ) : null}
-              </View>
-            );
-          }}
+      {room.data.voices.length ? (
+        <ChatBanner
+          icon="call"
+          tone="green"
+          text={`${room.data.voices.length} in a call · ${room.data.voices.map((v) => v.nickname).join(", ")}`}
+          action="Join"
+          onPress={() => router.push(`/call/${roomId}`)}
         />
+      ) : null}
+      {info.kind === "screening" && info.watchUrl ? (
+        <ChatBanner icon="film-outline" tone="violet" text={`Watching together: ${info.watchTitle || info.watchUrl}`} action="Watch" onPress={() => void router.push(`/chat/watch/${roomId}`)} />
+      ) : null}
 
-        {/* Live Typing Indicator Bar */}
-        {typingNames.length > 0 ? (
-          <View
-            style={[
-              styles.typingIndicatorBar,
-              { backgroundColor: theme.surfaceAlt },
-            ]}
-          >
-            <View style={styles.typingDotsGroup}>
-              <View
-                style={[styles.typingDot, { backgroundColor: theme.violet }]}
-              />
-              <View
-                style={[
-                  styles.typingDot,
-                  { backgroundColor: theme.pink, opacity: 0.8 },
-                ]}
-              />
-              <View
-                style={[
-                  styles.typingDot,
-                  { backgroundColor: theme.violet, opacity: 0.6 },
-                ]}
-              />
+      <FlatList
+        ref={list}
+        inverted
+        data={newestFirst}
+        keyExtractor={(m) => String(m.id)}
+        onScrollToIndexFailed={() => undefined}
+        renderItem={({ item, index }) => {
+          const newer = newestFirst[index - 1];
+          const older = newestFirst[index + 1];
+          const sameAsOlder = older?.author.userId === item.author.userId && new Date(item.createdAt).getTime() - new Date(older.createdAt).getTime() < 5 * 60_000;
+          const sameAsNewer = newer?.author.userId === item.author.userId && new Date(newer.createdAt).getTime() - new Date(item.createdAt).getTime() < 5 * 60_000;
+          const mine = item.author.userId === myId;
+          return (
+            <View>
+            <MessageBubble
+              message={item}
+              mine={mine}
+              replyTo={item.replyTo ? byId.get(item.replyTo) : undefined}
+              showName={!isDm && !sameAsOlder}
+              showAvatar={!sameAsNewer}
+              showTime={!sameAsNewer}
+              receipt={isDm && mine && item.id === myLast?.id ? (seen ? "Seen" : "Sent") : null}
+              highlighted={highlight === item.id}
+              onLongPress={() => setSelected(item)}
+              onOpenProfile={() => router.push(`/profile/${item.author.handle}`)}
+              onReact={(emoji) => void react(item, emoji)}
+            />
+            <ChatMessageContent roomId={roomId} messageId={item.id}/>
             </View>
-            <Txt
-              style={{
-                fontFamily: font.semibold,
-                fontSize: 12,
-                color: theme.muted,
-              }}
-            >
-              {typingNames.join(", ")}{" "}
-              {typingNames.length === 1 ? "is" : "are"} typing…
-            </Txt>
+          );
+        }}
+        ListHeaderComponent={typingNames.length ? <TypingBubble names={typingNames} /> : null}
+        contentContainerStyle={{ paddingVertical: 10, flexGrow: 1 }}
+        ListEmptyComponent={
+          <View style={{ flex: 1, justifyContent: "center", padding: 24 }}>
+            <EmptyHint emoji="👋" title="Say hello" text="No messages yet. Yours can be the first." />
           </View>
-        ) : null}
+        }
+        keyboardShouldPersistTaps="handled"
+      />
 
-        {/* ── AI REPLY SUGGESTIONS BAR (Mockup 4 Right Pane) ── */}
-        {(aiReplySuggestionsQuery.data?.length ?? 0) > 0 && !stickerTrayOpen ? (
-          <View
-            style={[
-              styles.aiSuggestionsBar,
-              {
-                backgroundColor: theme.surface,
-                borderTopColor: theme.border,
-              },
-            ]}
-          >
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.aiSuggestionsScroll}
-            >
-              <View style={styles.aiLabelChip}>
-                <Ionicons name="sparkles" size={13} color={theme.violet} />
-                <Txt
-                  style={{
-                    fontFamily: font.heavy,
-                    fontSize: 11,
-                    color: theme.toneText.violet,
-                  }}
-                >
-                  AI Reply
-                </Txt>
+      <ChatInputBar
+        value={text}
+        onChangeText={onChangeText}
+        onSend={() => void submit()}
+        onRecord={() => void toggleRecording()}
+        recording={voice.isRecording ? { seconds: formatSeconds(voice.seconds) } : null}
+        onAttach={() => setSheet("attach")}
+        onSticker={() => setSheet("stickers")}
+        onCamera={() => void attach("photo")}
+        sending={sending || voice.busy}
+        editing={!!editing}
+        placeholder={extra?.isRequest ? "Reply to accept…" : isDm ? `Message ${title}…` : "Message…"}
+        top={
+          replyTo || editing ? (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingTop: 8 }}>
+              <View style={{ width: 3, alignSelf: "stretch", borderRadius: 2, backgroundColor: theme.violet }} />
+              <View style={{ flex: 1 }}>
+                <Txt style={{ fontFamily: font.bold, fontSize: 12, lineHeight: 16, color: theme.toneText.violet }}>{editing ? "Editing your message" : `Replying to ${replyTo!.author.nickname}`}</Txt>
+                {replyTo ? <Txt numberOfLines={1} style={{ fontFamily: font.regular, fontSize: 12.5, lineHeight: 16, color: theme.muted }}>{previewText(replyTo.body) || "Attachment"}</Txt> : null}
               </View>
-              {aiReplySuggestionsQuery.data!.map((suggestion) => (
-                <PressableScale
-                  key={suggestion}
-                  onPress={() => {
-                    haptic.tap();
-                    setDraft(suggestion);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Use AI reply suggestion: ${suggestion}`}
-                  scaleTo={0.95}
-                  style={[
-                    styles.aiSuggestionPill,
-                    {
-                      backgroundColor: theme.tints.violet,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  <Txt
-                    numberOfLines={1}
-                    style={{
-                      fontFamily: font.semibold,
-                      fontSize: 12,
-                      color: theme.ink,
-                    }}
-                  >
-                    {suggestion}
-                  </Txt>
-                </PressableScale>
-              ))}
-            </ScrollView>
-          </View>
-        ) : null}
-
-        {/* Sticker / GIF Picker Tray */}
-        {stickerTrayOpen ? (
-          <View
-            style={[
-              styles.stickerTray,
-              {
-                backgroundColor: theme.surface,
-                borderTopColor: theme.border,
-              },
-            ]}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-                marginBottom: 6,
-              }}
-            >
-              <Txt
-                style={{
-                  fontFamily: font.heavy,
-                  fontSize: 13,
-                  color: theme.ink,
-                }}
-              >
-                Stickers & Expressive Reactions
-              </Txt>
-              <PressableScale
-                onPress={() => setStickerTrayOpen(false)}
-                accessibilityLabel="Close sticker tray"
-                scaleTo={0.9}
-              >
-                <Ionicons name="close" size={18} color={theme.muted} />
+              <PressableScale onPress={() => { setReplyTo(null); setEditing(null); setText(""); }} accessibilityLabel="Cancel" scaleTo={0.85} style={{ width: 40, height: 40, alignItems: "center", justifyContent: "center" }}>
+                <Ionicons name="close-circle" size={22} color={theme.subtle} />
               </PressableScale>
             </View>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ gap: 10 }}
-            >
-              {STICKERS.map((st) => (
-                <PressableScale
-                  key={st.id}
-                  onPress={() => {
-                    setStickerTrayOpen(false);
-                    void handleSendPayload({ body: encodeSticker(st.id) });
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Send ${st.label} sticker`}
-                  scaleTo={0.92}
-                  style={[
-                    styles.stickerTile,
-                    {
-                      backgroundColor: theme.surfaceAlt,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  <Txt style={{ fontSize: 30, lineHeight: 36 }}>
-                    {stickerEmoji(st.id)}
-                  </Txt>
-                  <Txt
-                    style={{
-                      fontFamily: font.semibold,
-                      fontSize: 10.5,
-                      color: theme.muted,
-                    }}
-                  >
-                    {st.label}
-                  </Txt>
-                </PressableScale>
-              ))}
-            </ScrollView>
-          </View>
-        ) : null}
+          ) : null
+        }
+      />
 
-        {/* Reply Quote Preview Bar */}
-        {replyingTo ? (
-          <View
-            style={[
-              styles.replyPreviewBar,
-              {
-                backgroundColor: theme.surfaceAlt,
-                borderTopColor: theme.border,
-              },
-            ]}
-          >
-            <View
-              style={[
-                styles.replyAccentBar,
-                { backgroundColor: theme.violet },
-              ]}
-            />
-            <View style={{ flex: 1 }}>
-              <Txt
-                style={{
-                  fontFamily: font.heavy,
-                  fontSize: 11.5,
-                  color: theme.toneText.violet,
-                }}
-              >
-                Replying to {replyingTo.author.nickname}
-              </Txt>
-              <Txt
-                numberOfLines={1}
-                style={{
-                  fontFamily: font.regular,
-                  fontSize: 12.5,
-                  color: theme.muted,
-                }}
-              >
-                {previewText(replyingTo.body) || "Attachment"}
-              </Txt>
-            </View>
-            <PressableScale
-              onPress={() => setReplyingTo(null)}
-              accessibilityRole="button"
-              accessibilityLabel="Cancel reply"
-              hitSlop={8}
-              scaleTo={0.9}
-            >
-              <Ionicons name="close-circle" size={19} color={theme.subtle} />
-            </PressableScale>
-          </View>
-        ) : null}
-
-        {/* ── COMPOSER DOCK WITH SCHEDULE, TRANSLATE, IMAGE, STICKER/GIF & VOICE ACTIONS ── */}
-        <View
-          style={[
-            styles.composerDock,
-            {
-              backgroundColor: theme.surface,
-              borderTopColor: theme.border,
-              paddingBottom: Math.max(insets.bottom, 10),
-            },
-          ]}
-        >
-          {/* Quick Action Toolbar Row (Image, Sticker/GIF, Voice Note, Translate Draft, Schedule) */}
-          <View style={styles.composerActionsRow}>
-            <PressableScale
-              onPress={() => void handlePickAndSendImage()}
-              accessibilityRole="button"
-              accessibilityLabel="Attach photo or image"
-              scaleTo={0.9}
-              style={[
-                styles.toolActionPill,
-                { backgroundColor: theme.surfaceAlt },
-              ]}
-            >
-              <Ionicons name="image-outline" size={16} color={theme.violet} />
-              <Txt style={[styles.toolActionLabel, { color: theme.ink }]}>
-                Image
-              </Txt>
-            </PressableScale>
-
-            <PressableScale
-              onPress={() => {
-                haptic.tap();
-                setStickerTrayOpen((v) => !v);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Open stickers and GIFs"
-              scaleTo={0.9}
-              style={[
-                styles.toolActionPill,
-                {
-                  backgroundColor: stickerTrayOpen
-                    ? theme.tints.violet
-                    : theme.surfaceAlt,
-                },
-              ]}
-            >
-              <Ionicons name="happy-outline" size={16} color={theme.pink} />
-              <Txt style={[styles.toolActionLabel, { color: theme.ink }]}>
-                Sticker/GIF
-              </Txt>
-            </PressableScale>
-
-            <PressableScale
-              onPress={() => setVoiceSheetOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel="Record voice note"
-              scaleTo={0.9}
-              style={[
-                styles.toolActionPill,
-                { backgroundColor: theme.surfaceAlt },
-              ]}
-            >
-              <Ionicons name="mic-outline" size={16} color={theme.ok} />
-              <Txt style={[styles.toolActionLabel, { color: theme.ink }]}>
-                Voice
-              </Txt>
-            </PressableScale>
-
-            <PressableScale
-              onPress={() => void handleTranslateOutgoingDraft()}
-              disabled={!draft.trim() || translatingDraft}
-              accessibilityRole="button"
-              accessibilityLabel="Translate your draft with AI"
-              scaleTo={0.9}
-              style={[
-                styles.toolActionPill,
-                { backgroundColor: theme.surfaceAlt },
-              ]}
-            >
-              <Ionicons
-                name="language-outline"
-                size={15}
-                color={theme.blue}
-              />
-              <Txt style={[styles.toolActionLabel, { color: theme.ink }]}>
-                {translatingDraft ? "…" : "Translate"}
-              </Txt>
-            </PressableScale>
-
-            <PressableScale
-              onPress={() => setScheduleSheetOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel="Schedule message"
-              scaleTo={0.9}
-              style={[
-                styles.toolActionPill,
-                { backgroundColor: theme.surfaceAlt },
-              ]}
-            >
-              <Ionicons name="time-outline" size={15} color={theme.orange} />
-              <Txt style={[styles.toolActionLabel, { color: theme.ink }]}>
-                Schedule
-              </Txt>
-            </PressableScale>
-          </View>
-
-          {/* Input Field + Send Button */}
-          <View style={styles.inputAndSendRow}>
-            <View
-              style={[
-                styles.textInputContainer,
-                {
-                  backgroundColor: theme.surfaceAlt,
-                  borderColor: theme.border,
-                },
-              ]}
-            >
-              <TextInput
-                value={draft}
-                onChangeText={handleDraftChange}
-                placeholder={`Message ${roomInfo.name}…`}
-                placeholderTextColor={theme.subtle}
-                multiline
-                maxLength={2000}
-                selectionColor={theme.accent}
-                accessibilityLabel={`Message ${roomInfo.name}`}
-                style={[styles.textInputField, { color: theme.ink }]}
-              />
-            </View>
-
-            <PressableScale
-              onPress={() => void handleSendPayload({ body: draft })}
-              disabled={!draft.trim() || sending}
-              accessibilityRole="button"
-              accessibilityLabel="Send message"
-              scaleTo={0.9}
-              style={[
-                styles.sendCircleBtn,
-                {
-                  opacity: draft.trim() ? 1 : 0.45,
-                },
-                draft.trim() ? shadow.glow(theme.violet, 0.4) : null,
-              ]}
-            >
-              <LinearGradient
-                colors={theme.gradHero}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[StyleSheet.absoluteFill, { borderRadius: 21 }]}
-              />
-              {sending ? (
-                <ActivityIndicator size="small" color="#FFFFFF" />
-              ) : (
-                <Ionicons name="send" size={17} color="#FFFFFF" />
-              )}
-            </PressableScale>
-          </View>
-        </View>
-      </KeyboardAvoidingView>
-
-      {/* Long-Press Message Reaction & Action Sheet */}
-      <Sheet
-        visible={Boolean(selectedMessage)}
-        title="Message Actions"
-        onClose={() => setSelectedMessage(null)}
-      >
-        {selectedMessage ? (
-          <View style={{ gap: 12 }}>
-            {/* Quick Emoji Reaction Bar */}
-            <View style={styles.quickReactionsRow}>
-              {QUICK_REACTIONS.map((emoji) => (
-                <PressableScale
-                  key={emoji}
-                  onPress={() => {
-                    const targetId = selectedMessage.id;
-                    setSelectedMessage(null);
-                    void handleToggleReaction(targetId, emoji);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`React with ${emoji}`}
-                  scaleTo={0.86}
-                  style={[
-                    styles.quickReactionCircle,
-                    {
-                      backgroundColor: theme.surfaceAlt,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  <Txt style={{ fontSize: 22 }}>{emoji}</Txt>
-                </PressableScale>
-              ))}
-            </View>
-
-            <View style={{ gap: 6 }}>
-              {messageMenuItems.map((item) => (
-                <PressableScale
-                  key={item.key}
-                  onPress={() => {
-                    setSelectedMessage(null);
-                    item.onPress();
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={item.label}
-                  scaleTo={0.98}
-                  style={[
-                    styles.sheetActionRow,
-                    {
-                      backgroundColor: theme.surfaceAlt,
-                      borderColor: theme.border,
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name={item.icon ?? "ellipsis-horizontal"}
-                    size={18}
-                    color={item.destructive ? theme.danger : theme.violet}
-                  />
-                  <Txt
-                    style={{
-                      fontFamily: font.bold,
-                      fontSize: 14,
-                      color: item.destructive ? theme.danger : theme.ink,
-                    }}
-                  >
-                    {item.label}
-                  </Txt>
-                </PressableScale>
-              ))}
-            </View>
-          </View>
-        ) : null}
-      </Sheet>
-
-      {/* Voice Note Recorder Sheet */}
-      <Sheet
-        visible={voiceSheetOpen}
-        title="Send a Voice Note 🎙️"
-        onClose={() => setVoiceSheetOpen(false)}
-      >
-        <Txt
-          style={{
-            fontFamily: font.regular,
-            fontSize: 13.5,
-            color: theme.muted,
-          }}
-        >
-          Send an interactive waveform voice note to {roomInfo.name}. Recipients
-          can play it back with animated audio bars right inside the bubble.
-        </Txt>
-        <View style={{ gap: 8 }}>
-          {VOICE_NOTE_PRESETS.map((preset) => (
-            <PressableScale
-              key={preset.key}
-              onPress={() => void handleSendVoiceNotePreset(preset)}
-              accessibilityRole="button"
-              accessibilityLabel={preset.label}
-              scaleTo={0.97}
-              style={[
-                styles.sheetActionRow,
-                {
-                  backgroundColor: theme.surfaceAlt,
-                  borderColor: theme.border,
-                },
-              ]}
-            >
-              <Ionicons name="mic" size={18} color={theme.ok} />
-              <Txt
-                style={{
-                  flex: 1,
-                  fontFamily: font.bold,
-                  fontSize: 13.5,
-                  color: theme.ink,
-                }}
-              >
-                {preset.label}
-              </Txt>
-              <Ionicons name="send" size={15} color={theme.violet} />
+      {/* ── Long-press menu: reactions, reply, edit, delete, report ── */}
+      <Sheet visible={!!selected} title="Message" onClose={() => setSelected(null)}>
+        <View style={{ flexDirection: "row", justifyContent: "space-between", padding: 6, borderRadius: radius.pill, backgroundColor: theme.surfaceAlt }}>
+          {REACTIONS.map((emoji) => (
+            <PressableScale key={emoji} onPress={() => selected && void react(selected, emoji)} accessibilityLabel={`React ${emoji}`} scaleTo={0.8} style={{ width: 44, height: 44, alignItems: "center", justifyContent: "center" }}>
+              <Txt style={{ fontSize: 26, lineHeight: 32 }}>{emoji}</Txt>
             </PressableScale>
           ))}
         </View>
+        {selected && !selected.deleted ? (
+          <>
+            <OptionRow icon="arrow-undo-outline" title="Reply" onPress={() => { setReplyTo(selected); setEditing(null); setSelected(null); }} right={null} />
+            {mineSelected && !selected.mediaKind ? (
+              <OptionRow icon="create-outline" title="Edit" onPress={() => { setEditing(selected); setReplyTo(null); setText(selected.body); setSelected(null); }} right={null} />
+            ) : null}
+            <OptionRow icon="trash-outline" title="Delete" onPress={() => remove(selected)} right={null} />
+            {mineSelected ? null : (
+              <OptionRow
+                icon="flag-outline"
+                title="Report"
+                onPress={() => {
+                  setReport({ targetType: "message", targetId: String(selected.id), communityId: info.communityId ?? undefined, label: "message" });
+                  setSelected(null);
+                }}
+                right={null}
+              />
+            )}
+          </>
+        ) : null}
       </Sheet>
 
-      {/* Schedule Message Sheet */}
-      <Sheet
-        visible={scheduleSheetOpen}
-        title="Schedule Message 🕒"
-        onClose={() => setScheduleSheetOpen(false)}
-      >
-        <Txt
-          style={{
-            fontFamily: font.regular,
-            fontSize: 13,
-            color: theme.muted,
-          }}
-        >
-          Queue a message to send at a specific time (great for episode drops or
-          watch party reminders).
-        </Txt>
-        <Field
-          label="Message to schedule"
-          value={draft}
-          onChangeText={setDraft}
-          placeholder="Write your message…"
-          multiline
-        />
-        <Field
-          label="Delivery time"
-          value={scheduleTimeLabel}
-          onChangeText={setScheduleTimeLabel}
-          placeholder="e.g. Tonight · 8:00 PM"
-        />
-        <GradientButton
-          label="Schedule Message"
-          icon="time"
-          gradient="hero"
-          size="lg"
-          full
-          disabled={!draft.trim()}
-          onPress={handleScheduleMessage}
-        />
+      <Sheet visible={sheet === "attach"} title="Attach" onClose={() => setSheet(null)}>
+        <OptionRow icon="images-outline" title="Photo from library" onPress={() => void attach("photo")} right={null} />
+        <OptionRow icon="camera-outline" title="Take a photo" onPress={() => void attach("camera")} right={null} />
+        <OptionRow icon="videocam-outline" title="Short video" text="Up to 30 seconds" onPress={() => void attach("video")} right={null} />
       </Sheet>
 
-      <ActionMenu
-        visible={roomMenuOpen}
-        title={roomInfo.name}
-        items={headerMenuItems}
-        onClose={() => setRoomMenuOpen(false)}
-      />
-      <ReportSheet
-        target={reportTarget}
-        onClose={() => setReportTarget(null)}
-      />
-    </View>
+      <SearchSheet visible={sheet === "search"} roomId={roomId} onClose={() => setSheet(null)} onPick={jumpTo} loaded={byId} />
+      <StickerPicker visible={sheet === "stickers"} onClose={() => setSheet(null)} onPick={(id) => void sendSticker(id)} />
+      <RoomSettings visible={sheet === "settings"} onClose={() => setSheet(null)} page={room.data} myId={myId} onChanged={() => void refresh()} />
+      <ReportSheet target={report} onClose={() => setReport(null)} />
+    </KeyboardAvoidingView>
   );
 }
 
-const styles = StyleSheet.create({
-  headerBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-  },
-  backIconBtn: {
-    width: 34,
-    height: 36,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerIdentityRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
-  },
-  headerActionCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  pinnedBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-  },
-  pinnedBarAccent: {
-    width: 3,
-    height: 28,
-    borderRadius: 1.5,
-  },
-  watchPartyMiniPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    height: 26,
-    paddingHorizontal: 9,
-    borderRadius: radius.pill,
-  },
-  scheduledBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderBottomWidth: 1,
-  },
-  sendScheduledNowBtn: {
-    height: 24,
-    paddingHorizontal: 10,
-    borderRadius: radius.pill,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  loadOlderPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    height: 30,
-    paddingHorizontal: 14,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-  },
-  dateDividerWrap: {
-    alignItems: "center",
-    paddingVertical: 8,
-  },
-  dateDividerPill: {
-    paddingHorizontal: 12,
-    height: 24,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  translateInlineChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    height: 22,
-    paddingHorizontal: 8,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-  },
-  typingIndicatorBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-  },
-  typingDotsGroup: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 3,
-  },
-  typingDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  aiSuggestionsBar: {
-    borderTopWidth: 1,
-    paddingVertical: 7,
-  },
-  aiSuggestionsScroll: {
-    paddingHorizontal: 12,
-    gap: 7,
-    alignItems: "center",
-  },
-  aiLabelChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingRight: 4,
-  },
-  aiSuggestionPill: {
-    height: 28,
-    paddingHorizontal: 11,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  stickerTray: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderTopWidth: 1,
-  },
-  stickerTile: {
-    width: 68,
-    height: 68,
-    borderRadius: radius.tile,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 2,
-  },
-  replyPreviewBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderTopWidth: 1,
-  },
-  replyAccentBar: {
-    width: 3,
-    height: 30,
-    borderRadius: 1.5,
-  },
-  composerDock: {
-    paddingHorizontal: 12,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    gap: 8,
-  },
-  composerActionsRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    flexWrap: "wrap",
-  },
-  toolActionPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    height: 26,
-    paddingHorizontal: 9,
-    borderRadius: radius.pill,
-  },
-  toolActionLabel: {
-    fontFamily: font.semibold,
-    fontSize: 11,
-  },
-  inputAndSendRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-  },
-  textInputContainer: {
-    flex: 1,
-    minHeight: 42,
-    maxHeight: 110,
-    borderRadius: 21,
-    borderWidth: 1,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    justifyContent: "center",
-  },
-  textInputField: {
-    fontFamily: font.regular,
-    fontSize: 14,
-    lineHeight: 19,
-    outlineWidth: 0,
-  },
-  sendCircleBtn: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-  },
-  quickReactionsRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-  },
-  quickReactionCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sheetActionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: radius.card,
-    borderWidth: 1,
-  },
-});
+/** Search this conversation (the server searches the whole history). */
+function SearchSheet({ visible, roomId, onClose, onPick, loaded }: { visible: boolean; roomId: number; onClose: () => void; onPick: (id: number) => void; loaded: Map<number, ChatMessage> }) {
+  const theme = useTheme();
+  const [q, setQ] = useState("");
+  const query = useDebounced(q.trim(), 300);
+  const results = useQuery({ queryKey: ["searchMessages", roomId, query], queryFn: () => api.searchMessages(roomId, query), enabled: visible && query.length >= 2 });
+  return (
+    <Sheet visible={visible} title="Search this chat" onClose={onClose}>
+      <Field value={q} onChangeText={setQ} placeholder="Search messages" autoCapitalize="none" autoFocus />
+      {query.length < 2 ? (
+        <Txt variant="small" tone="muted">Type at least two letters.</Txt>
+      ) : results.isPending ? (
+        <Txt variant="small" tone="muted">Searching…</Txt>
+      ) : results.isError ? (
+        <Txt variant="small" tone="danger">{errorMessage(results.error)}</Txt>
+      ) : results.data?.length ? (
+        results.data.map((m) => {
+          const here = loaded.has(m.id);
+          return (
+            <PressableScale key={m.id} onPress={() => onPick(m.id)} disabled={!here} accessibilityLabel={`${m.author.nickname}: ${previewText(m.body)}. ${here ? "Show in chat" : "Older message"}`} scaleTo={0.98} style={{ gap: 2, padding: 10, borderRadius: 12, backgroundColor: theme.surfaceAlt }}>
+              <View style={{ flexDirection: "row", gap: 6 }}>
+                <Txt style={{ flex: 1, fontFamily: font.bold, fontSize: 12.5, lineHeight: 16, color: theme.ink }}>{m.author.nickname}</Txt>
+                <Txt style={{ fontFamily: font.regular, fontSize: 11.5, lineHeight: 15, color: theme.subtle }}>{timeAgo(m.createdAt)}{here ? "" : " · older"}</Txt>
+              </View>
+              <Txt numberOfLines={3} style={{ fontFamily: font.regular, fontSize: 13.5, lineHeight: 18, color: theme.text }}>{previewText(m.body) || "Attachment"}</Txt>
+            </PressableScale>
+          );
+        })
+      ) : (
+        <Txt variant="small" tone="muted">No messages match that.</Txt>
+      )}
+    </Sheet>
+  );
+}

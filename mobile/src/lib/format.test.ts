@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compactCount, compactNumber, parseLocalDateTime, plainPreview, plural, shortTimeAgo, timeAgo } from "./format.ts";
+import { compactCount, compactNumber, levelFromRep, parseLocalDateTime, plainPreview, plural, shortTimeAgo, timeAgo } from "./format.ts";
 
 const now = Date.parse("2026-09-28T12:00:00Z");
 test("timeAgo picks a readable unit", () => {
@@ -49,4 +49,12 @@ test("parseLocalDateTime accepts real dates only", () => {
 
 test("plainPreview removes markdown marks but keeps the words", () => {
   assert.equal(plainPreview("## Say hello!\nMeet **everyone** and read [the rules](https://x.test)\n- be kind"), "Say hello! Meet everyone and read the rules be kind");
+});
+
+test("levelFromRep: 40 reputation per level, starting at 1", () => {
+  assert.equal(levelFromRep(0), 1);
+  assert.equal(levelFromRep(39), 1);
+  assert.equal(levelFromRep(40), 2);
+  assert.equal(levelFromRep(845), 22);
+  assert.equal(levelFromRep(-5), 1);
 });
