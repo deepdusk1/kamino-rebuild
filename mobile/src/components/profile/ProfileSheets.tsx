@@ -1,5 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useState } from "react";
 import { ActivityIndicator, FlatList, ScrollView, View } from "react-native";
@@ -26,8 +26,17 @@ export type ListKind = "followers" | "following" | "friends";
 export function FollowListSheet({ handle, kind, onKind, onClose, viewerId }: { handle: string; kind: ListKind | null; onKind: (k: ListKind) => void; onClose: () => void; viewerId?: string }) {
   const theme = useTheme();
   const queryClient = useQueryClient();
-  const list = useQuery({ queryKey: ["followLists", handle, kind], queryFn: () => api.followLists(handle, kind!), enabled: !!kind });
-  const counts = list.data?.counts;
+  // 50 at a time; more load as you scroll (lists used to stop at 200).
+  const list = useInfiniteQuery({
+    queryKey: ["followLists", handle, kind],
+    queryFn: ({ pageParam }) => api.followLists(handle, kind!, pageParam),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => last.next ?? undefined,
+    enabled: !!kind,
+  });
+  const first = list.data?.pages[0];
+  const counts = first?.counts;
+  const people = list.data?.pages.flatMap((p) => p.people) ?? [];
   const [busy, setBusy] = useState<string | null>(null);
 
   const toggle = async (person: PersonRow) => {
@@ -58,13 +67,22 @@ export function FollowListSheet({ handle, kind, onKind, onClose, viewerId }: { h
     >
       {list.isPending ? (
         <Loading />
-      ) : list.isError ? (
+      ) : list.isError || !first ? (
         <ErrorState error={list.error} onRetry={() => void list.refetch()} />
-      ) : list.data.locked ? (
-        <EmptyHint emoji="🔒" title="This account is private" text="Follow them to see who they follow." style={{ margin: 16 }} />
+      ) : first.locked ? (
+        first.reason === "hidden" ? (
+          <EmptyHint emoji="🙈" title="This list is hidden" text={`@${handle} chose not to show it.`} style={{ margin: 16 }} />
+        ) : (
+          <EmptyHint emoji="🔒" title="This list isn't available" text="If the account is private, follow them to see it." style={{ margin: 16 }} />
+        )
       ) : (
         <FlatList
-          data={list.data.people}
+          data={people}
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            if (list.hasNextPage && !list.isFetchingNextPage) void list.fetchNextPage();
+          }}
+          ListFooterComponent={list.isFetchingNextPage ? <ActivityIndicator style={{ marginVertical: 12 }} /> : null}
           keyExtractor={(p) => p.userId}
           contentContainerStyle={{ padding: 12, gap: 8, flexGrow: 1 }}
           ListHeaderComponent={kind === "friends" ? <Txt style={{ fontFamily: font.regular, fontSize: 12.5, lineHeight: 17, color: theme.muted, marginBottom: 4 }}>Friends are people who follow each other.</Txt> : null}

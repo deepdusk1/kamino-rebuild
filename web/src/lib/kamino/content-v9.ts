@@ -63,6 +63,7 @@ export const getUploadAllowance = createServerFn({ method: "GET" })
 async function profileReadable(sql: Sql, viewer: string | null, owner: string) {
   const p = (await sql`select user_id,private_account from profiles where user_id=${owner}`)[0];
   if (!p || (await blockedSet(sql, viewer)).has(owner)) throw new Error("Profile unavailable.");
+  if (viewer !== owner) await internals.assertPersonAvailable(sql, owner);
   if (
     asBool(p.private_account) &&
     viewer !== owner &&
@@ -80,7 +81,7 @@ async function profileReadable(sql: Sql, viewer: string | null, owner: string) {
 async function contentAccess(sql: Sql, viewer: string | null, postId: number) {
   const post = (await sql`select * from posts where id=${postId}`)[0];
   if (!post) throw new Error("Post unavailable.");
-  await internals.assertAccountAllowed(sql,String(post.author_user_id));
+  await internals.assertPersonAvailable(sql,String(post.author_user_id));
   if(viewer&&post.content_warning&&(await sql`select 1 from profiles where user_id=${viewer} and sensitive_content='hide'`).length)throw new Error("Post unavailable.");
   if (!post.expires_at || new Date(String(post.expires_at)).getTime() > Date.now())
     return requirePostAccess(sql, viewer, postId);

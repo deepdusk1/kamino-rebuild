@@ -245,7 +245,15 @@ export type ProfileOverview = {
   categoryCounts: Record<string, number>;
 };
 export type ProfilePostsPage = { posts: FeedPost[]; next: string | null; locked: boolean };
-export type FollowList = { people: PersonRow[]; counts: { followers: number; following: number; friends: number }; locked: boolean };
+/** One page of a followers / following / friends list. `next` is the cursor for the next page (null = no more). */
+export type FollowList = {
+  people: PersonRow[];
+  counts: { followers: number; following: number; friends: number };
+  locked: boolean;
+  /** Why it's locked: a private account (or a block), or the person hid this list. */
+  reason: "private" | "hidden" | null;
+  next: string | null;
+};
 export type FollowRequestRow = {
   userId: string; handle: string; displayName: string; avatarHue: number; avatarV: number; headline: string; verified: boolean; createdAt: string;
 };

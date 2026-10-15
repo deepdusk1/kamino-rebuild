@@ -52,7 +52,7 @@ export const getProfileStories = createServerFn({ method: "GET" })
     )[0];
     if (!p || (await internals.blockedSet(sql, viewer)).has(owner))
       throw new Error("Profile unavailable.");
-    await internals.assertAccountAllowed(sql, owner);
+    await internals.assertPersonAvailable(sql, owner);
     if (
       owner !== viewer &&
       asBool(p.private_account) &&

@@ -1561,6 +1561,8 @@ async function loadProfileFor(sql: Sql, handle: string, viewer: string | null) {
   const row = (await sql`select * from profiles where handle = ${handle} or user_id = ${handle} limit 1`)[0];
   if (!row) throw new Error("No one by that name.");
   const isSelf = viewer === row.user_id;
+  // Banned or suspended accounts aren't shown to others (and the reason is never revealed).
+  if (!isSelf) await internals.assertPersonAvailable(sql, String(row.user_id));
   const profile = scrubProfile(mapProfile(row), isSelf);
   const rel = viewer
     ? (
@@ -1744,12 +1746,17 @@ export const profilePosts = createServerFn({ method: "GET" })
     };
   });
 
-/** Followers, following, or friends (people who follow each other). Private accounts: followers only. */
+/**
+ * Followers, following, or friends (people who follow each other), 50 at a time (`next` is the cursor for more; it
+ * used to stop at 200 with no way to see the rest). Private accounts, blocks and "hide my lists" lock it.
+ * Banned or suspended accounts are left out.
+ */
 export const followLists = createServerFn({ method: "GET" })
   .middleware([optionalAuth])
-  .validator((d: { handle: string; kind: "followers" | "following" | "friends" }) => ({
+  .validator((d: { handle: string; kind: "followers" | "following" | "friends"; cursor?: string | null }) => ({
     handle: String(d?.handle ?? "").trim().replace(/^@/, ""),
     kind: d?.kind === "following" || d?.kind === "friends" ? d.kind : ("followers" as const),
+    cursor: typeof d?.cursor === "string" ? d.cursor.slice(0, 200) : null,
   }))
   .handler(async ({ context, data }) => {
     const sql = await db();
@@ -1757,19 +1764,14 @@ export const followLists = createServerFn({ method: "GET" })
     const ctx = await viewerContext(sql, viewer);
     const who = await loadProfileFor(sql, data.handle, viewer);
     const counts = await followCounts(sql, who.profile.userId);
-    if (who.locked) return { people: [] as PersonRow[], counts, locked: true };
+    // `reason` lets the app say why: a private account (or a block) vs a person who hid this list.
+    if (who.locked) return { people: [] as PersonRow[], counts, locked: true, reason: "private" as "private" | "hidden" | null, next: null as string | null };
     const privacy = (await sql<Row>`select hide_followers,hide_following from profiles where user_id=${who.profile.userId}`)[0];
-    if(viewer!==who.profile.userId && ((data.kind==='followers'&&asBool(privacy?.hide_followers)) || (data.kind!=='followers'&&asBool(privacy?.hide_following)))) return {people:[] as PersonRow[],counts,locked:true};
-    const id = who.profile.userId;
-    const query =
-      data.kind === "followers"
-        ? `select p.*, f.created_at as since from profile_follows f join profiles p on p.user_id = f.follower_id where f.followee_id = $1`
-        : data.kind === "following"
-          ? `select p.*, f.created_at as since from profile_follows f join profiles p on p.user_id = f.followee_id where f.follower_id = $1`
-          : `select p.*, a.created_at as since from profile_follows a
-             join profile_follows b on b.follower_id = a.followee_id and b.followee_id = a.follower_id
-             join profiles p on p.user_id = a.followee_id where a.follower_id = $1`;
-    const rows = (await sql.query<Row>(`${query} order by since desc limit 200`, [id])).filter((r) => !ctx.blocked.has(String(r.user_id)));
+    if (viewer !== who.profile.userId && ((data.kind === "followers" && asBool(privacy?.hide_followers)) || (data.kind !== "followers" && asBool(privacy?.hide_following))))
+      return { people: [] as PersonRow[], counts, locked: true, reason: "hidden" as "private" | "hidden" | null, next: null as string | null };
+    const { followListPage } = await import("./profile-lists.server");
+    const { rows: pageRows, next } = await followListPage(sql, who.profile.userId, data.kind, data.cursor);
+    const rows = pageRows.filter((r) => !ctx.blocked.has(String(r.user_id)));
     const ids = rows.map((r) => String(r.user_id));
     const followsYou = await followersOfViewer(sql, viewer, ids);
     const requested = new Set(
@@ -1795,7 +1797,7 @@ export const followLists = createServerFn({ method: "GET" })
         requested: requested.has(p.userId),
       };
     });
-    return { people, counts, locked: false };
+    return { people, counts, locked: false, reason: null as "private" | "hidden" | null, next };
   });
 
 /** People waiting for you to approve their follow request (private accounts). */
@@ -1831,6 +1833,8 @@ export const answerFollowRequest = createServerFn({ method: "POST" })
     const { userId } = context as Authed;
     const gone = await sql`delete from follow_requests where follower_id = ${data.userId} and followee_id = ${userId} returning follower_id`;
     if (!gone.length) throw new Error("This request is no longer waiting.");
+    const blockedPair = await sql`select 1 from blocks where (blocker_id = ${userId} and blocked_id = ${data.userId}) or (blocker_id = ${data.userId} and blocked_id = ${userId})`;
+    if (data.accept && blockedPair.length) return { ok: true, accepted: false };
     if (data.accept) {
       await sql`insert into profile_follows (follower_id, followee_id) values (${data.userId}, ${userId}) on conflict do nothing`;
       const me = (await sql<{ display_name: string; handle: string }>`select display_name, handle from profiles where user_id = ${userId}`)[0];

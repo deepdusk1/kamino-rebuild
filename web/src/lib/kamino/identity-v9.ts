@@ -7,7 +7,7 @@ import { asBool, mapProfile } from './map';
 import { isSiteAdmin, checkContent } from './safety.server';
 import type { Sql } from '@/lib/db';
 
-const { db, ensureProfile, blockedSet, assertAccountAllowed } = internals;
+const { db, ensureProfile, blockedSet } = internals;
 const access = z.enum(['everyone', 'following', 'none']);
 function sessionDevice(value: unknown) {
   const agent = String(value ?? '');
@@ -54,7 +54,7 @@ function preferences(row: Record<string, unknown>) {
 }
 
 export async function assertInviteAllowed(sql: Sql, actor: string, target: string) {
-  await assertAccountAllowed(sql, target);
+  await internals.assertPersonAvailable(sql, target);
   if ((await blockedSet(sql, actor)).has(target)) throw new Error('This person is unavailable.');
   const row = (await sql`select invite_privacy from profiles where user_id = ${target}`)[0];
   if (!row || row.invite_privacy === 'none') throw new Error('This person has invitations closed.');
@@ -159,7 +159,7 @@ export const getProfileIdentity = createServerFn({ method: 'GET' }).middleware([
   const sql = await db(); const viewer = (context as unknown as Viewer).userId;
   const row = (await sql`select * from profiles where handle = ${data}`)[0];
   if (!row) throw new Error('Profile not found.');
-  const id = String(row.user_id); await assertAccountAllowed(sql,id);
+  const id = String(row.user_id); await internals.assertPersonAvailable(sql,id);
   if ((await blockedSet(sql, viewer)).has(id)) throw new Error('Profile not found.');
   const follows = viewer ? (await sql`select 1 from profile_follows where follower_id = ${viewer} and followee_id = ${id}`).length > 0 : false;
   if (asBool(row.private_account) && id !== viewer && !follows) return { links: [], interests: [], profileHue: Number(row.profile_hue), mutuals: [], supporterBadges:[] as string[] };

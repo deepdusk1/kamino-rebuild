@@ -514,6 +514,8 @@ export const EXPLORE_BANNERS: Hero[] = [
 export function scrubProfile<T extends {
   quietStart: number | null; quietEnd: number | null; timezone: string; notifyPrefs: NotifyPrefs; interests: string[];
   showOnline: boolean; lastSeenAt: string | null; showReadReceipts: boolean;
+  lastCheckinAt?: string | null; onboardedAt?: string | null;
+  notifyLikes?: boolean; notifyComments?: boolean; notifyFollows?: boolean; notifyChat?: boolean; notifyWall?: boolean;
 }>(profile: T, isSelf: boolean): T {
   if (isSelf) return profile;
   return {
@@ -525,6 +527,12 @@ export function scrubProfile<T extends {
     interests: [],
     showReadReceipts: true,
     lastSeenAt: profile.showOnline ? profile.lastSeenAt : null,
+    // The check-in time showed when someone was last active even with "Show when I'm online" off. Others only need
+    // the day (for the streak), so the time is dropped.
+    ...(profile.lastCheckinAt !== undefined ? { lastCheckinAt: profile.lastCheckinAt ? `${profile.lastCheckinAt.slice(0, 10)}T00:00:00.000Z` : null } : {}),
+    ...(profile.onboardedAt !== undefined ? { onboardedAt: null } : {}),
+    // Someone's own notification switches are theirs alone.
+    ...(profile.notifyLikes !== undefined ? { notifyLikes: true, notifyComments: true, notifyFollows: true, notifyChat: true, notifyWall: true } : {}),
   };
 }
 

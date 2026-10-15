@@ -63,7 +63,7 @@ export const getMediaLibraryFile = createServerFn({method:"GET"})
     const sql=await internals.db();
     await internals.requireMinAge(sql,context.userId);
     const row=await readableLibraryMedia(sql,context.userId,data.libraryId);
-    await internals.assertAccountAllowed(sql,String(row.owner_id));
+    await internals.assertPersonAvailable(sql,String(row.owner_id));
     return {dataUrl:await loadMedia(String(row.storage_ref)),mime:String(row.mime),kind:String(row.kind),filename:String(row.filename),altText:String(row.alt_text),title:String(row.title)};
   });
 
@@ -99,7 +99,7 @@ export const shortVideoFeed = createServerFn({method:"GET"})
     let scanned=0;
     for(const row of candidates){
       scanned++;
-      try{await internals.requirePostAccess(sql,viewer,Number(row.id));await internals.assertAccountAllowed(sql,String(row.author_user_id));}
+      try{await internals.requirePostAccess(sql,viewer,Number(row.id));await internals.assertPersonAvailable(sql,String(row.author_user_id));}
       catch{continue;}
       items.push({id:Number(row.id),title:String(row.title),body:String(row.body),slug:String(row.community_id),handle:String(row.handle),displayName:String(row.display_name),warning:String(row.content_warning),blur:!!row.content_warning&&settings?.sensitive_content!=="show",media:{id:Number(row.media_id),kind:"short",filename:String(row.filename),altText:String(row.alt_text),captions:String(row.captions),url:`/api/v1/content-media/${row.media_id}`}});
       if(items.length===12)break;
