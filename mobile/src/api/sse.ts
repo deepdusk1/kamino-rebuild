@@ -26,6 +26,7 @@ const SERVER_EVENT_ALIASES: Record<string, KaminoRealtimeEventType> = {
   receipt: "chat.read",
   call: "call.incoming",
   "call-declined": "call.ended",
+  "call-ended": "call.ended",
   voice: "stage.update",
 };
 

@@ -34,7 +34,6 @@ import {
   callRoomFrom,
 } from "@/components/IncomingCallBanner";
 import { Aurora, Backdrop, Button, Txt } from "@/components/ui";
-import { callsAvailable } from "@/lib/calls/webrtc";
 import { OfflineBanner } from "@/lib/connectivity";
 import { appHrefFromServerHref } from "@/lib/hrefs";
 import { wireOfflineFlush } from "@/lib/offline-queue";
@@ -69,7 +68,8 @@ function resolveNotificationAppRoute(
 ): Href | null {
   if (target) {
     if (target.isCall && target.roomId !== null) {
-      return `/call/${target.roomId}` as Href;
+      // Opens the ringing screen (Answer / Decline); the microphone only starts once you answer.
+      return `/call/${target.roomId}?mode=incoming` as Href;
     }
     if (target.isEventOrLive && target.roomId !== null) {
       return `/live/${target.roomId}` as Href;
@@ -88,12 +88,12 @@ function resolveNotificationAppRoute(
 
   const callRoom = callRoomFrom(trimmed);
   if (callRoom !== null) {
-    return `/call/${callRoom}` as Href;
+    return `/call/${callRoom}?mode=incoming` as Href;
   }
 
   const directCallMatch = /^\/call\/(\d+)(?:[?#]|$)/.exec(trimmed);
   if (directCallMatch?.[1]) {
-    return `/call/${Number(directCallMatch[1])}` as Href;
+    return `/call/${Number(directCallMatch[1])}?mode=incoming` as Href;
   }
 
   const directLiveMatch = /^\/live\/(\d+)(?:[?#]|$)/.exec(trimmed);
@@ -140,16 +140,10 @@ export function ErrorBoundary({ error, retry }: ErrorBoundaryProps) {
 
 /**
  * Mounts and manages the singleton SSE stream (`GET /api/events`) via `useRealtimeSSE`,
- * synchronizes TanStack Query caches in real time, and handles incoming/ended call events:
- * - On `call.incoming` or `call.ring`: auto-navigates to `/call/[roomId]` when not already in a call.
- * - On `call.ended`: dismisses any active system ringing notification and stops ringtone loops.
+ * synchronizes TanStack Query caches in real time, and stops ringing when a call ends (`call.ended`).
+ * Incoming calls are shown by IncomingCallBanner, which asks before joining.
  */
 export function RealtimeSSEBridge({ signedIn }: { signedIn: boolean }) {
-  const pathname = usePathname();
-  const navState = useRootNavigationState();
-  const navReady = Boolean(navState?.key);
-  const lastAutoRoutedCallKey = useRef<string | null>(null);
-
   useRealtimeSSE(signedIn);
 
   const onRealtimeEvent = useCallback(
@@ -167,24 +161,10 @@ export function RealtimeSSEBridge({ signedIn }: { signedIn: boolean }) {
         return;
       }
 
-      if (event.type === "call.incoming" || event.type === "call.ring") {
-        if (!navReady || !callsAvailable()) return;
-        if (pathname.startsWith("/call/")) return;
-
-        const hrefField =
-          typeof event.payload.href === "string" ? event.payload.href : null;
-        const parsedRoomFromHref = hrefField ? callRoomFrom(hrefField) : null;
-        const targetRoomId = event.roomId ?? parsedRoomFromHref;
-        if (targetRoomId === null || !Number.isFinite(targetRoomId)) return;
-
-        const dedupKey = `${event.id ?? "call"}:${targetRoomId}`;
-        if (lastAutoRoutedCallKey.current === dedupKey) return;
-        lastAutoRoutedCallKey.current = dedupKey;
-
-        router.push(`/call/${targetRoomId}` as Href);
-      }
+      // Incoming calls ring through IncomingCallBanner (Answer / Decline). The call screen is never opened here:
+      // opening it joins the call and switches on the microphone, so it has to be the person's choice.
     },
-    [signedIn, navReady, pathname],
+    [signedIn],
   );
 
   useSSEListener(onRealtimeEvent);
@@ -302,6 +282,11 @@ function Navigation() {
         // Inline Reply, Mark Read, or Decline Call was handled silently in the background.
         return;
       }
+      // "Answer" on the notification: join the call straight away.
+      if (actionId === "ACCEPT_CALL" && parsedTarget.roomId !== null) {
+        navigateToTarget(`/call/${parsedTarget.roomId}?mode=answer` as Href);
+        return;
+      }
 
       const destination = resolveNotificationAppRoute(
         actionHref ?? parsedTarget.href,
@@ -359,14 +344,7 @@ function Navigation() {
           return;
         }
 
-        if (
-          target.isCall &&
-          target.roomId !== null &&
-          callsAvailable() &&
-          !pathname.startsWith("/call/")
-        ) {
-          router.push(`/call/${target.roomId}` as Href);
-        }
+        // An incoming call that arrives while Kamino is open is shown by IncomingCallBanner; nothing joins by itself.
       });
 
     return () => {

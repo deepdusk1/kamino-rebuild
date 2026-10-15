@@ -57,7 +57,8 @@ export const mediaStorageEnabled = (): boolean => config() !== null;
 
 // ────────────────────────────── references ──────────────────────────────
 
-const REF = /^s3:([A-Za-z0-9/_-]+)\|([a-z]+\/[a-z0-9.+-]+)$/;
+// The key may end in one file extension (room recordings are saved as `.mp4`); no other dots, so never "..".
+const REF = /^s3:([A-Za-z0-9/_-]+(?:\.[a-z0-9]{1,5})?)\|([a-z]+\/[a-z0-9.+-]+)$/;
 
 /** True for a value that points at a stored file (as opposed to holding the file itself as a data URL). */
 export const isMediaRef = (value: string): boolean => value.startsWith("s3:");

@@ -8,7 +8,11 @@ test("server links map to app screens", () => {
   assert.equal(appHrefFromServerHref("/c/starlight"), "/community/starlight");
   assert.equal(appHrefFromServerHref("/chats/7"), "/chat/7");
   assert.equal(appHrefFromServerHref("/c/starlight/roleplay/5"), "/community/starlight/roleplay/5");
-  assert.equal(appHrefFromServerHref("/chats/7?call=1"), "/call/7", "a ringing call opens the call screen");
+  assert.equal(
+    appHrefFromServerHref("/chats/7?call=1"),
+    "/call/7?mode=incoming",
+    "a ringing call opens the call screen with Answer / Decline, without joining",
+  );
   assert.equal(appHrefFromServerHref("/u/mira"), "/profile/mira");
   assert.equal(appHrefFromServerHref("/invite/abc-def?from=notification"), "/invite/abc-def");
   assert.equal(appHrefFromServerHref("/discover-plus"), "/tools?tab=discovery");

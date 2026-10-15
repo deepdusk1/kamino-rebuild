@@ -26,7 +26,7 @@ export function appHrefFromServerHref(href: string): string {
   const community = /^\/c\/([^/?#]+)/.exec(href);
   if (community) return `/community/${community[1]}`;
   const call = /^\/chats\/(\d+)\?call=1$/.exec(href);
-  if (call) return `/call/${call[1]}`;
+  if (call) return `/call/${call[1]}?mode=incoming`;
   const chat = /^\/chats\/(\d+)$/.exec(href);
   if (chat) return `/chat/${chat[1]}`;
   const profile = /^\/u\/([^/?#]+)/.exec(href);

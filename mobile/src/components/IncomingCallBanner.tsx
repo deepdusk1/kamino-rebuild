@@ -6,7 +6,6 @@ import { router, usePathname } from "expo-router";
 import { useEffect, useRef } from "react";
 import { Platform, StyleSheet, Vibration, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { rpc } from "@/api/client";
 import { api } from "@/api/endpoints";
 import { useSSEListener } from "@/api/sse";
 import { PersonAvatar } from "@/components/k";
@@ -14,10 +13,7 @@ import { PressableScale, Txt } from "@/components/ui";
 import { callsAvailable } from "@/lib/calls/webrtc";
 import { useAction } from "@/lib/errors";
 import { haptic } from "@/lib/haptics";
-import {
-  dismissIncomingCallNotification,
-  presentDataPayloadNotification,
-} from "@/lib/push";
+import { dismissIncomingCallNotification } from "@/lib/push";
 import { font, radius, shadow, useTheme } from "@/theme";
 
 type IncomingCallEntry = {
@@ -36,13 +32,12 @@ export function callRoomFrom(href: string): number | null {
 }
 
 /**
- * Full-Screen WhatsApp-Style Incoming Call Screen (`mobile/src/components/IncomingCallBanner.tsx`):
- * - Bug #2 Acceptance Criterion: End-to-end `caller-dials -> callee-sees-incoming-call -> LiveKit-connects -> clean-hangup`
- * - Listens to `call.incoming` / `call.ring` and `call.ended` via Module 1 SSE (`useSSEListener`)
- *   and wakes the `kamino_calls_critical_v2` (`bypassDnd: true`) Android notification channel with ringtone & vibration loop
- * - Works from foreground, background, and killed state via Module 1 `push.ts` FCM data payload handlers
- * - Accept button → dismisses system notification, halts vibration, and navigates to `/call/[roomId]` to join LiveKit
- * - Decline button → calls `rpc("endCall", { roomId })` AND `api.declineCall(call.id)` so BOTH caller and callee hang up cleanly
+ * The full-screen incoming-call overlay shown while Kamino is open.
+ * - Appears when someone rings you (live over `/api/events`, or from the list of unanswered rings) and vibrates.
+ * - Answer: opens the call screen and joins (`/call/[roomId]?mode=answer`).
+ * - Decline: tells the caller (`declineCall`); their screen closes and "Call declined" is posted in the chat.
+ * - Disappears when the caller hangs up (`call.ended`) or after 45 seconds without an answer.
+ * When Kamino is in the background or closed, the push notification rings instead (see src/lib/push.ts).
  */
 export function IncomingCallBanner() {
   const theme = useTheme();
@@ -56,54 +51,21 @@ export function IncomingCallBanner() {
     queryFn: api.incomingCalls,
     enabled,
     staleTime: 0,
+    // While a call rings, check every few seconds so the banner goes away when the caller gives up
+    // (the server stops listing a ring after 45 seconds).
+    refetchInterval: (query) => (query.state.data?.length ? 5_000 : false),
   });
 
-  // Wire SSE call signaling directly into the incoming-call overlay & system ringtone channel
+  // A new ring or a finished call: reload the list. The phone's ringtone comes from the push notification,
+  // so nothing is played here (that would ring twice).
   useSSEListener((event) => {
     if (!enabled) return;
-
     if (event.type === "call.incoming" || event.type === "call.ring") {
-      const rId =
-        event.roomId ??
-        (typeof event.payload.href === "string"
-          ? callRoomFrom(event.payload.href)
-          : null);
-      const callerName =
-        typeof event.payload.callerName === "string"
-          ? event.payload.callerName
-          : typeof event.payload.name === "string"
-            ? event.payload.name
-            : "Kamino Member";
-      const callId =
-        typeof event.payload.callId === "number"
-          ? event.payload.callId
-          : typeof event.payload.id === "number"
-            ? event.payload.id
-            : Date.now();
-
-      if (rId !== null && !pathname.startsWith("/call/")) {
-        void presentDataPayloadNotification({
-          kind: "call.incoming",
-          roomId: rId,
-          callId,
-          callerName,
-          title: `${callerName} is calling…`,
-          body: "Tap Answer to join the voice & video call",
-          href: `/chats/${rId}?call=1`,
-        });
-      }
       void queryClient.invalidateQueries({ queryKey: ["incomingCalls"] });
       return;
     }
-
     if (event.type === "call.ended") {
-      const callId =
-        typeof event.payload.callId === "number"
-          ? event.payload.callId
-          : typeof event.payload.id === "number"
-            ? event.payload.id
-            : null;
-      void dismissIncomingCallNotification(event.roomId, callId);
+      void dismissIncomingCallNotification(event.roomId, null);
       void queryClient.invalidateQueries({ queryKey: ["incomingCalls"] });
     }
   });
@@ -159,7 +121,7 @@ export function IncomingCallBanner() {
       );
       await api.dismissNotification(callId).catch(() => undefined);
       void queryClient.invalidateQueries({ queryKey: ["incomingCalls"] });
-      router.push(`/call/${targetRoomId}`);
+      router.push(`/call/${targetRoomId}?mode=answer`);
     },
   );
 
@@ -177,12 +139,9 @@ export function IncomingCallBanner() {
               )
             : [],
       );
-      // Clean hangup on BOTH ends via exact `endCall` RPC + `declineCall` notification dismissal
-      await Promise.allSettled([
-        rpc("endCall", { roomId: targetRoomId }),
-        api.endCall(targetRoomId),
-        api.declineCall(callId),
-      ]);
+      // Tells the caller: their call screen closes and "Call declined" is posted in the chat. (Ending the call
+      // instead would also stop it for everyone else in a group call.)
+      await api.declineCall(callId).catch(() => undefined);
       await queryClient.invalidateQueries({ queryKey: ["incomingCalls"] });
     },
   );

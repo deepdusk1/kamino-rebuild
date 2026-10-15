@@ -280,7 +280,7 @@ export default function ChatRoom() {
         onPressTitle={isDm && info.peerHandle ? () => router.push(`/profile/${info.peerHandle}`) : undefined}
         actions={[
           { icon: "search-outline", label: "Search messages", onPress: () => setSheet("search") },
-          { icon: "call-outline", label: "Start or join a call", onPress: () => router.push(`/call/${roomId}`) },
+          { icon: "call-outline", label: "Start or join a call", onPress: () => router.push(`/call/${roomId}?mode=dial`) },
           { icon: "ellipsis-horizontal", label: "Chat settings and invites", onPress: () => setSheet("settings") },
         ]}
       />
@@ -321,7 +321,7 @@ export default function ChatRoom() {
           tone="green"
           text={`${room.data.voices.length} in a call · ${room.data.voices.map((v) => v.nickname).join(", ")}`}
           action="Join"
-          onPress={() => router.push(`/call/${roomId}`)}
+          onPress={() => router.push(`/call/${roomId}?mode=dial`)}
         />
       ) : null}
       {info.kind === "screening" && info.watchUrl ? (
