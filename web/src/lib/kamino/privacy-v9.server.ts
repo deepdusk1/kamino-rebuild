@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Sql } from "../db";
 import { loadMedia } from "./media-store.server.ts";
 import { stageMediaDeletion } from "./media-deletion.server.ts";
+import { handOverOwnedCommunities } from "./community-membership.server.ts";
 
 type Row = Record<string, unknown>;
 type ReadMedia = (reference: string) => Promise<string>;
@@ -183,6 +184,8 @@ export async function prepareV9AccountDeletion(sql: Sql, userId: string, options
   await sql`update identity_admin_grants set granted_by=${pseudonym} where granted_by=${userId}`;
   await sql`update identity_account_status set actor_id=${pseudonym} where actor_id=${userId}`;
   await sql`update notification_campaigns set actor_id=${pseudonym} where actor_id=${userId}`;
+  // A community the member owns gets a new owner (co-leader, curator, then most active member) instead of none.
+  await handOverOwnedCommunities(sql, userId);
   // A surviving group needs a real owner for member management and message pinning.
   await sql.query(`update chat_rooms room set created_by=(
     select member.user_id from chat_members member join profiles p on p.user_id=member.user_id

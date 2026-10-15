@@ -55,7 +55,6 @@ function PrivacyDashboard() {
         <Toggle label="Appear in people search" value={d.preferences.searchVisible} onChange={searchVisible => void save({searchVisible})}/>
         <Toggle label="Hide my followers list" value={d.preferences.hideFollowers} onChange={hideFollowers => void save({hideFollowers})}/>
         <Toggle label="Hide my following list" value={d.preferences.hideFollowing} onChange={hideFollowing => void save({hideFollowing})}/>
-        <Toggle label="Restricted mode: only 13+ communities" value={d.preferences.restrictedMode} onChange={restrictedMode => void save({restrictedMode})}/>
         <label className="block">Sensitive content<select className={fieldClass} value={d.preferences.sensitiveContent} onChange={e => void save({sensitiveContent:e.target.value as 'blur'})}><option value="blur">Blur warnings</option><option value="hide">Hide warned posts</option>{d.ageBand === '18+' && <option value="show">Show warned posts</option>}</select></label>
         <Toggle label="High contrast" value={d.preferences.highContrast} onChange={highContrast => void save({highContrast})}/>
         <label className="block">Text size<select className={fieldClass} value={d.preferences.textScale} onChange={e => void save({textScale:e.target.value as 'standard'})}><option value="standard">Standard</option><option value="large">Large</option><option value="largest">Largest</option></select></label>

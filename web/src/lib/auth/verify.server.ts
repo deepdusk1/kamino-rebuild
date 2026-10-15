@@ -70,6 +70,20 @@ export async function getSessionUser(
   return { id: session.user.id, email: session.user.email ?? null };
 }
 
+/** The id of the session making this request (to mark "this device" in the sessions list), or null. */
+export async function currentSessionId(bearerToken?: string): Promise<string | null> {
+  if (!authConfigured && !gateIdentityEnabled()) return null;
+  const request = getRequest();
+  if (!request) return null;
+  let headers = request.headers;
+  if (bearerToken) {
+    headers = new Headers(request.headers);
+    headers.set("Authorization", `Bearer ${bearerToken}`);
+  }
+  const session = await auth.api.getSession({ headers });
+  return session?.session?.id ? String(session.session.id) : null;
+}
+
 /**
  * Resolve the current user id for a server function, or throw when unauthorized.
  * Prefer `authMiddleware` (`./middleware`), which calls this for you.
