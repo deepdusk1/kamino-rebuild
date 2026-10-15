@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "944590520474",
+    "project_id": "directed-fabric-511700-e0",
+    "storage_bucket": "directed-fabric-511700-e0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:944590520474:android:fe04431340a2041ce65f23",
+        "android_client_info": {
+          "package_name": "com.kelnovalabs.kamino"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "944590520474-p1msbi9308cofdfbtrmqe2aop379rq6b.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDqEn2DI7R9QtOzNuqbsQ_Nt1mZkktC88s"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "944590520474-p1msbi9308cofdfbtrmqe2aop379rq6b.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
