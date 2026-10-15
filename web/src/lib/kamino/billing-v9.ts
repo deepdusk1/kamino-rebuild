@@ -65,8 +65,9 @@ export const getBillingStatus = createServerFn({ method: "GET" })
       enabled: config.enabled,
       mode: config.mode,
       reason: config.reason,
+      // Phone purchases stay off on purpose: app stores require their own billing for digital goods.
       mobilePaymentsEnabled: false,
-      creatorPayoutsEnabled: false,
+      creatorPayoutsEnabled: config.mode === "live",
     };
   });
 
@@ -75,10 +76,15 @@ export const getMyBilling = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const sql = await internals.db(),
       userId = uid(context);
+    const { billingIsLive } = await import("./billing-policy");
+    const live = billingIsLive();
     const orders =
-      await sql<Row>`select id,offer_id,title,kind,price_minor,currency,status,test_mode,created_at,stripe_subscription_id from billing_orders where buyer_id=${userId} order by created_at desc limit 60`;
+      await sql<Row>`select id,offer_id,title,kind,price_minor,currency,status,test_mode,created_at,checkout_mode,renews,stripe_subscription_id,stripe_payment_intent_id from billing_orders
+        where buyer_id=${userId} and status<>'expired' order by created_at desc limit 60`;
+    // Only purchases from the current mode grant access, so only those are listed as access.
     const entitlements =
-      await sql<Row>`select e.offer_id,o.title,e.state,e.expires_at,e.test_mode from billing_entitlements e join billing_orders o on o.id=e.order_id where e.beneficiary_id=${userId} and o.kind<>'tip' order by e.updated_at desc limit 60`;
+      await sql<Row>`select e.order_id,e.offer_id,o.title,e.state,e.expires_at,e.test_mode,o.checkout_mode,o.renews,o.status from billing_entitlements e join billing_orders o on o.id=e.order_id
+        where e.beneficiary_id=${userId} and o.kind<>'tip' and e.test_mode=${!live} order by e.updated_at desc limit 60`;
     const requirements =
       await sql<Row>`select resource_kind,resource_id,offer_id from billing_resource_requirements where owner_id=${userId}`;
     const profile = (
@@ -94,17 +100,29 @@ export const getMyBilling = createServerFn({ method: "GET" })
         priceMinor: Number(row.price_minor),
         currency: String(row.currency),
         status: String(row.status),
-        testMode: true as const,
-        subscription: Boolean(row.stripe_subscription_id),
+        testMode: row.test_mode !== false,
+        subscription: row.checkout_mode === "subscription",
+        renews: row.checkout_mode === "subscription" && row.status === "paid" ? row.renews !== false : null,
+        receipt:
+          Boolean(row.stripe_payment_intent_id) &&
+          ["paid", "refunded", "disputed", "cancelled", "failed"].includes(String(row.status)) &&
+          (row.test_mode !== false) === !live,
         createdAt: iso(row.created_at),
       })),
-      entitlements: entitlements.map((row) => ({
-        offerId: Number(row.offer_id),
-        title: String(row.title),
-        state: String(row.state),
-        expiresAt: row.expires_at ? iso(row.expires_at) : null,
-        testMode: true as const,
-      })),
+      entitlements: entitlements.map((row) => {
+        const expiresAt = row.expires_at ? iso(row.expires_at) : null;
+        return {
+          orderId: String(row.order_id),
+          offerId: Number(row.offer_id),
+          title: String(row.title),
+          state: String(row.state),
+          active:
+            row.state === "active" && (!expiresAt || new Date(expiresAt).getTime() > Date.now()),
+          expiresAt,
+          renews: row.checkout_mode === "subscription" && row.status === "paid" ? row.renews !== false : null,
+          testMode: row.test_mode !== false,
+        };
+      }),
       requirements: requirements.map((row) => ({
         kind: String(row.resource_kind) as PaidResourceKind,
         resourceId: String(row.resource_id),
@@ -208,7 +226,7 @@ export const createStripeCheckout = createServerFn({ method: "POST" })
     }
     if (
       (
-        await sql`select 1 from billing_entitlements where beneficiary_id=${beneficiary} and offer_id=${data.offerId} and state='active' and (expires_at is null or expires_at>now())`
+        await sql`select 1 from billing_entitlements where beneficiary_id=${beneficiary} and offer_id=${data.offerId} and state='active' and test_mode=${config.mode !== "live"} and (expires_at is null or expires_at>now())`
       ).length &&
       offer.kind !== "tip"
     )
@@ -217,9 +235,10 @@ export const createStripeCheckout = createServerFn({ method: "POST" })
     for (let attempt = 0; attempt < 3; attempt++) {
       const newId = crypto.randomUUID(),
         mode = ["membership", "premium"].includes(String(offer.kind)) ? "subscription" : "payment";
+      // test_mode records which Stripe account took the money; access rules only honour the current mode.
       const created =
-        await sql<Row>`insert into billing_orders(id,buyer_id,beneficiary_id,offer_id,seller_id,kind,title,price_minor,currency,checkout_mode)
-        values(${newId},${userId},${beneficiary},${data.offerId},${String(offer.owner_id)},${String(offer.kind)},${String(offer.title)},${Number(offer.price_minor)},${String(offer.currency)},${mode}) on conflict do nothing returning *`;
+        await sql<Row>`insert into billing_orders(id,buyer_id,beneficiary_id,offer_id,seller_id,kind,title,price_minor,currency,checkout_mode,test_mode)
+        values(${newId},${userId},${beneficiary},${data.offerId},${String(offer.owner_id)},${String(offer.kind)},${String(offer.title)},${Number(offer.price_minor)},${String(offer.currency)},${mode},${config.mode !== "live"}) on conflict do nothing returning *`;
       const row =
         created[0] ??
         (
@@ -240,8 +259,10 @@ export const openBillingPortal = createServerFn({ method: "POST" })
     const config = requireBillingConfig(),
       sql = await internals.db(),
       userId = uid(context);
+    // The portal must open on the Stripe account (test or live) this server is using now.
     const row = (
-      await sql<Row>`select stripe_customer_id from billing_orders where buyer_id=${userId} and stripe_customer_id is not null and stripe_subscription_id is not null order by updated_at desc limit 1`
+      await sql<Row>`select stripe_customer_id from billing_orders where buyer_id=${userId} and stripe_customer_id is not null and stripe_subscription_id is not null
+        and test_mode=${config.mode !== "live"} and privacy_closed=false order by updated_at desc limit 1`
     )[0];
     if (!row) throw new Error("No subscription billing account is available.");
     const portal = await stripeRequest(config)(
@@ -253,7 +274,17 @@ export const openBillingPortal = createServerFn({ method: "POST" })
       }),
     );
     const { trustedStripeRedirect } = await import("./billing-rules");
-    return { url: trustedStripeRedirect(portal.url), testMode: true as const };
+    return { url: trustedStripeRedirect(portal.url), testMode: config.mode !== "live" };
+  });
+
+export const getOrderReceipt = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((data: unknown) => z.object({ orderId: z.string().trim().min(1).max(100) }).parse(data))
+  .handler(async ({ context, data }) => {
+    const { requireBillingConfig, orderReceiptUrl } = await import("./billing.server");
+    const config = requireBillingConfig();
+    const sql = await internals.db();
+    return { url: await orderReceiptUrl(sql, config, uid(context), data.orderId) };
   });
 
 export const setPaidResource = createServerFn({ method: "POST" })

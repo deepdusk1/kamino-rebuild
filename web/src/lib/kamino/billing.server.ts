@@ -7,9 +7,12 @@ import {
   assertPaidCheckout,
   assertPaymentIntentMatches,
   billingConfig,
+  chargeOutcome,
   object,
   stripeId,
   subscriptionAccessUntil,
+  subscriptionRenews,
+  trustedReceiptUrl,
   trustedStripeRedirect,
   type BillingConfig,
   type BillingOrderSnapshot,
@@ -20,7 +23,7 @@ import {
 type Row = Record<string, unknown>;
 export type StripeRequest = (
   path: string,
-  method?: "GET" | "POST",
+  method?: "GET" | "POST" | "DELETE",
   data?: URLSearchParams,
   idempotencyKey?: string,
 ) => Promise<StripeObject>;
@@ -54,6 +57,8 @@ export function stripeRequest(config: BillingConfig): StripeRequest {
     };
     if (data) headers["content-type"] = "application/x-www-form-urlencoded";
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
+    if (method === "DELETE" && !/^\/v1\/subscriptions\/sub_[A-Za-z0-9]+$/.test(path))
+      throw new Error("Invalid payment operation.");
     const response = await fetch(`https://api.stripe.com${path}`, {
       method,
       headers,
@@ -108,6 +113,9 @@ async function persist(
     customer?: string | null;
     subscription?: string | null;
     paymentIntent?: string | null;
+    renews?: boolean | null;
+    /** The refunded or disputed charge, so only that charge's creator earnings are reversed. */
+    reversedPayment?: string | null;
   } = {},
 ) {
   const active = status === "paid" && row.kind !== "tip";
@@ -115,7 +123,7 @@ async function persist(
   const changed = await sql.query(
     `with changed as (
     update billing_orders set status=$2,stripe_customer_id=coalesce($6,stripe_customer_id),stripe_subscription_id=coalesce($7,stripe_subscription_id),
-      stripe_payment_intent_id=coalesce($8,stripe_payment_intent_id),updated_at=now(),billing_revision=billing_revision+1 where id=$1 and billing_revision=$9 and privacy_closed=false
+      stripe_payment_intent_id=coalesce($8,stripe_payment_intent_id),renews=case when $2='paid' then coalesce($12::boolean,renews) else false end,updated_at=now(),billing_revision=billing_revision+1 where id=$1 and billing_revision=$9 and privacy_closed=false
       and exists(select 1 from billing_webhook_events where event_id=$10 and claim_token=$11 and status='processing')
       and (status not in ('refunded','disputed','cancelled') or $2 in ('refunded','disputed','cancelled')) returning id,beneficiary_id,offer_id
   ), entitlement as (insert into billing_entitlements(order_id,beneficiary_id,offer_id,state,expires_at,test_mode)
@@ -133,6 +141,7 @@ async function persist(
       Number(row.billing_revision ?? 0),
       lease.eventId,
       lease.claim,
+      ids.renews ?? null,
     ],
   );
   if (status === "paid" && changed.length) {
@@ -145,7 +154,7 @@ async function persist(
   }
   if ((status === "refunded" || status === "disputed") && changed.length) {
     const { reverseCreatorEarnings } = await import("./money.server.ts");
-    await reverseCreatorEarnings(sql, String(row.id)).catch((error) => {
+    await reverseCreatorEarnings(sql, String(row.id), ids.reversedPayment ?? null).catch((error) => {
       console.error("[billing] earnings reversal failed; the reconciliation pass will retry:", error);
     });
   }
@@ -200,8 +209,20 @@ async function updateSubscription(
       customer: subscription.customer ? stripeId(subscription.customer, "cus") : null,
       subscription: subId,
       paymentIntent,
+      renews: subscriptionRenews(subscription),
     },
   );
+}
+
+/**
+ * Stops Stripe billing a subscription whose access was taken away by a full refund or a dispute.
+ * Without this the member keeps being charged every month while the refunded order stays closed.
+ * Safe to repeat: an already-cancelled subscription is left alone.
+ */
+async function endSubscription(api: StripeRequest, subId: string) {
+  const subscription = await api(`/v1/subscriptions/${subId}`);
+  if (["canceled", "incomplete_expired"].includes(String(subscription.status))) return;
+  await api(`/v1/subscriptions/${subId}`, "DELETE");
 }
 
 async function fulfillCheckout(
@@ -234,7 +255,8 @@ async function fulfillCheckout(
 async function revokeCharge(sql: Sql, charge: StripeObject, api: StripeRequest, lease: WriteLease) {
   if (typeof charge.livemode === "boolean" && charge.livemode !== (lease.livemode === true))
     throw new Error("The payment event does not match this server's billing mode.");
-  let row: Row | undefined;
+  let row: Row | undefined,
+    invoiceSubscription: string | null = null;
   if (charge.payment_intent)
     row = (
       await sql<Row>`select * from billing_orders where stripe_payment_intent_id=${stripeId(charge.payment_intent, "pi")}`
@@ -244,6 +266,7 @@ async function revokeCharge(sql: Sql, charge: StripeObject, api: StripeRequest, 
     const invoice = await api(`/v1/invoices/${stripeId(charge.invoice, "in")}`);
     if (invoice.subscription) {
       const subId = stripeId(invoice.subscription, "sub");
+      invoiceSubscription = subId;
       row = (await sql<Row>`select * from billing_orders where stripe_subscription_id=${subId}`)[0];
       if (row?.privacy_closed === true) return;
       if (!row) {
@@ -282,9 +305,15 @@ async function revokeCharge(sql: Sql, charge: StripeObject, api: StripeRequest, 
     }
   }
   if (!row) return;
-  if (Number(charge.amount_refunded ?? 0) > 0 || charge.refunded === true)
-    await persist(sql, row, "refunded", null, lease);
-  else if (charge.disputed === true) await persist(sql, row, "disputed", null, lease);
+  const outcome = chargeOutcome(charge);
+  if (!outcome) return; // A partial refund is a goodwill credit: access stays.
+  await persist(sql, row, outcome, null, lease, {
+    reversedPayment: charge.payment_intent ? stripeId(charge.payment_intent, "pi") : null,
+  });
+  if (row.checkout_mode === "subscription") {
+    const subId = row.stripe_subscription_id ? String(row.stripe_subscription_id) : invoiceSubscription;
+    if (subId) await endSubscription(api, subId);
+  }
 }
 
 /** Claim before processing; durable idempotency and retry leases also cover concurrent webhook delivery. */
@@ -447,17 +476,21 @@ export async function resumeCheckout(
   const live = config.mode === "live";
   if (row.status !== "pending") throw new Error("Check your purchase history before trying again.");
   const order = snapshot(row);
+  const expire = async () => {
+    const changed =
+      await sql`update billing_orders set status='expired',updated_at=now(),billing_revision=billing_revision+1 where id=${order.id} and status='pending' and billing_revision=${Number(row.billing_revision ?? 0)} returning id`;
+    if (!changed.length) throw new Error("This checkout changed. Please retry.");
+    return { expired: true as const };
+  };
+  // A sandbox checkout left over from before real payments were switched on (or the other way round)
+  // can never be paid with this server's keys, so it must not block a new purchase.
+  if ((row.test_mode !== false) !== !live) return expire();
   if (row.stripe_session_id) {
     const session = await api(`/v1/checkout/sessions/${String(row.stripe_session_id)}`);
     assertCheckoutMatches(session, order, config.mode === "live");
     if (session.id !== row.stripe_session_id)
       throw new Error("Checkout does not match the stored session.");
-    if (session.status === "expired") {
-      const changed =
-        await sql`update billing_orders set status='expired',updated_at=now(),billing_revision=billing_revision+1 where id=${order.id} and status='pending' and billing_revision=${Number(row.billing_revision ?? 0)} returning id`;
-      if (!changed.length) throw new Error("This checkout changed. Please retry.");
-      return { expired: true };
-    }
+    if (session.status === "expired") return expire();
     if (session.status !== "open")
       throw new Error(
         "Checkout is awaiting payment confirmation. Check your purchase history before trying again.",
@@ -469,14 +502,62 @@ export async function resumeCheckout(
       testMode: !live,
     };
   }
-  // A lost provider response older than its guaranteed idempotency retention needs review,
-  // rather than a fresh key or a second potentially chargeable session.
+  // No session was ever saved, so the buyer never received a checkout link. Within 24 hours the same
+  // idempotency key returns the same session if Stripe did create one. After that, any session Stripe
+  // made has expired unpaid (sessions last at most 24 hours and nobody had its link), so the order is
+  // closed and a fresh one starts, instead of blocking this purchase forever.
   const created = new Date(String(row.created_at)).getTime();
-  if (!Number.isFinite(created) || Date.now() - created >= 24 * 3600000)
-    throw new Error("This unfinished checkout needs support review before another attempt.");
+  if (!Number.isFinite(created) || Date.now() - created >= 24 * 3600000) return expire();
   const checkout = await checkoutUrl(config, order, { title: String(row.title) }, api);
   const changed =
     await sql`update billing_orders set stripe_session_id=${checkout.sessionId},updated_at=now(),billing_revision=billing_revision+case when stripe_session_id is null then 1 else 0 end where id=${order.id} and status='pending' and (stripe_session_id is null or stripe_session_id=${checkout.sessionId}) returning id`;
   if (!changed.length) throw new Error("This checkout changed. Check your purchase history.");
   return { expired: false, orderId: order.id, url: checkout.url, testMode: !live };
+}
+
+/**
+ * The Stripe receipt for one of the buyer's own orders. Read on demand so it always matches Stripe
+ * (refunds included) and older orders get one too. Subscriptions show the latest charged month.
+ */
+export async function orderReceiptUrl(
+  sql: Sql,
+  config: BillingConfig,
+  userId: string,
+  orderId: string,
+  api = stripeRequest(config),
+): Promise<string> {
+  if (!config.enabled) throw new Error("Payments are disabled.");
+  const row = (
+    await sql<Row>`select id,status,test_mode,stripe_payment_intent_id from billing_orders where id=${orderId} and buyer_id=${userId} and privacy_closed=false`
+  )[0];
+  if (!row || !["paid", "refunded", "disputed", "cancelled", "failed"].includes(String(row.status)) || !row.stripe_payment_intent_id)
+    throw new Error("There's no receipt for this order.");
+  if ((row.test_mode !== false) !== (config.mode !== "live"))
+    throw new Error("This receipt is from a sandbox purchase and isn't available any more.");
+  const payment = await api(`/v1/payment_intents/${stripeId(row.stripe_payment_intent_id, "pi")}`);
+  const url = payment.latest_charge
+    ? trustedReceiptUrl((await api(`/v1/charges/${stripeId(payment.latest_charge, "ch")}`)).receipt_url)
+    : null;
+  if (!url) throw new Error("The receipt isn't ready yet. Please try again in a minute.");
+  return url;
+}
+
+/**
+ * Account deletion: stop every subscription this person pays for before their rows are erased, so a
+ * deleted account is never charged again. A provider error stops the deletion (the person can retry)
+ * rather than leaving a subscription billing an account that no longer exists.
+ */
+export async function endSubscriptionsForAccount(
+  sql: Sql,
+  userId: string,
+  config = getBillingConfig(),
+  api?: StripeRequest,
+): Promise<number> {
+  if (!config.enabled) return 0;
+  const rows = await sql<Row>`select distinct stripe_subscription_id from billing_orders
+    where buyer_id=${userId} and checkout_mode='subscription' and stripe_subscription_id is not null
+      and privacy_closed=false and test_mode=${config.mode !== "live"} and status in ('pending','paid','failed')`;
+  const request = api ?? stripeRequest(config);
+  for (const row of rows) await endSubscription(request, stripeId(row.stripe_subscription_id, "sub"));
+  return rows.length;
 }

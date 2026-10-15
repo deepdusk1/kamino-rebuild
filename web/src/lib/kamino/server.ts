@@ -28,7 +28,7 @@ import { deleteMedia, isMediaRef, loadMedia, storeMedia } from "./media-store.se
 import { BUBBLE_STYLES, COMMUNITY_MODULES, PROFILE_FRAME_IDS, THEME_STYLES, type CommunityModule } from "./types";
 import { clampHue } from "./theme";
 import { checkContent, reviewContent } from "./safety.server";
-import { paidResourceAccessSql } from './billing-policy';
+import { billingIsLive, paidResourceAccessSql } from './billing-policy';
 import { paidRoomAccessSql } from './paid-room-policy';
 import { notificationTargetSql, legacyEventNotificationAccessSql } from './notification-target-sql';
 import { paidPostAccessSql } from './paid-post-policy';
@@ -394,10 +394,11 @@ async function requireRoomAccess(sql: Sql, userId: string, roomId: number) {
   const kind = String(roomRow.kind);
   if (communityId && kind === 'private') {
     // Buying this explicitly mapped room grants entry, while an unrelated offer grants nothing.
+    // Only a purchase made in the server's current billing mode counts (real money in live mode).
     const purchased = await sql`select 1 from billing_resource_requirements br
       join billing_entitlements be on be.offer_id=br.offer_id
       where br.resource_kind='chat' and br.resource_id=${String(roomId)}
-        and be.beneficiary_id=${userId} and be.state='active' and be.test_mode=true
+        and be.beneficiary_id=${userId} and be.state='active' and be.test_mode=${!billingIsLive()}
         and (be.expires_at is null or be.expires_at>now()) limit 1`;
     if (purchased.length) {
       await sql`insert into chat_members(room_id,user_id) values(${roomId},${userId}) on conflict do nothing`;

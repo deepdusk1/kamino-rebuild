@@ -596,9 +596,11 @@ function Market() {
   return (
     <div className="space-y-4">
       <p className={`${card} text-muted`}>
-        {q.data?.paymentsEnabled
-          ? "Sandbox offers. Test purchases do not move real money."
-          : "Browse creator offers. Purchases are unavailable until payments are configured."}
+        {!q.data?.paymentsEnabled
+          ? "Browse creator offers. Purchases are unavailable until payments are configured."
+          : q.data.paymentsMode === "live"
+            ? "Payments are processed securely by Stripe. Subscriptions renew monthly until you cancel."
+            : "Sandbox offers. Test purchases do not move real money."}
       </p>
       <QueryState query={q} />
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -617,6 +619,7 @@ function Market() {
               offerId={Number(o.id)}
               kind={String(o.kind)}
               enabled={q.data?.paymentsEnabled === true}
+              mode={q.data?.paymentsMode ?? "disabled"}
             />
           </div>
         ))}

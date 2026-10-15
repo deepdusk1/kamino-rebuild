@@ -1,5 +1,6 @@
 import { AdminManagement } from "@/components/AdminManagement";
 import { BillingPanel } from "@/components/BillingPanel";
+import { phonePurchaseNote } from "@/lib/billing-labels";
 import { Collaborations } from "@/components/Collaborations";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
@@ -464,7 +465,7 @@ function Market() {
   return (
     <>
       <Card>
-        <Txt>Purchases are unavailable for now.</Txt>
+        <Txt>{phonePurchaseNote(q.data?.paymentsEnabled ? q.data.paymentsMode : "disabled")}</Txt>
       </Card>
       <ErrorText error={q.error} />
       {q.data?.offers.map((o) => (
@@ -478,7 +479,9 @@ function Market() {
             {(Number(o.price_minor) / 100).toFixed(2)}{" "}
             {String(o.currency).toUpperCase()}
           </Txt>
-          <Button label="Payments unavailable" disabled onPress={() => {}} />
+          <Txt variant="caption" tone="muted">
+            {q.data?.paymentsEnabled ? "Available on the Kamino website" : "Not available yet"}
+          </Txt>
         </Card>
       ))}
       <BillingPanel />
