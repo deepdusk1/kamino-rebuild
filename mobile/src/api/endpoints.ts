@@ -182,6 +182,14 @@ export const api = {
   writeEnding: (sceneId: number, direction: string) => rpc<{ ok: boolean }>("writeEnding", { sceneId, direction }),
   endScene: (sceneId: number) => rpc<{ ok: boolean }>("endScene", { sceneId }),
   deleteScene: (sceneId: number) => rpc<{ ok: boolean }>("deleteScene", { sceneId }),
+  /** Story voting: the current round's options, asking the AI for options, voting, and continuing with the winner. */
+  storyBranches: (sceneId: number) => rpc<import("./types").StoryBranches>("getAiStoryBranches", { sceneId }),
+  proposeStoryBranches: (sceneId: number) => rpc<import("./types").StoryBranches>("proposeAiStoryBranches", { sceneId }),
+  voteStoryBranch: (sceneId: number, optionId: number) =>
+    rpc<import("./types").StoryBranches>("voteAiStoryBranch", { sceneId, optionId }),
+  applyStoryBranch: (sceneId: number) => rpc<{ ok: true; chosen: string }>("applyAiStoryBranch", { sceneId }),
+  /** Story creator or moderator: hide every turn after `turnId` and continue from there. */
+  rewindStory: (sceneId: number, turnId: number) => rpc<{ ok: true; hidden: number }>("rewindAiStoryCheckpoint", { sceneId, turnId }),
 
   // ── Calls ────────────────────────────────────────────────────────────────
   iceServers: () => rpc<M.IceServer[]>("getIceServers"),

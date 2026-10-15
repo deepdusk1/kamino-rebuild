@@ -1,102 +1,169 @@
 /**
- * AI story room server features: checkpoint rewinds and branch voting.
+ * AI story branch voting and checkpoint rewinds for role-play stories (`roleplay_scenes` / `roleplay_turns`).
  *
- * The mobile story screen authors checkpoints locally and calls these RPCs
- * fire-and-forget so the room converges across devices. The server records the
- * canonical per-scene state (current checkpoint pointer, vote tallies) and
- * enforces community membership — same conventions as `server.ts` and
- * `watch.ts`. Reachable from the phone app over `/api/v1/rpc/<name>`
- * (see `mobile-api.ts`).
+ * - `getAiStoryBranches`: the current round's "what happens next" options, with vote counts.
+ * - `proposeAiStoryBranches`: asks the AI storyteller for options (once per round).
+ * - `voteAiStoryBranch`: one vote per member per round; voting again for the same option removes it.
+ * - `applyAiStoryBranch`: the storyteller continues the story in the direction with the most votes.
+ * - `rewindAiStoryCheckpoint`: the story's creator or a moderator rewinds to an earlier turn.
+ *
+ * A round is the latest visible turn: any new turn (a member's turn, narration, an ending or a rewind) starts a new
+ * round, so old options and votes stop being current. The database steps are in story.server.ts (tested there);
+ * this file does the permission checks. Reachable from the phone over `/api/v1/rpc/<name>` (see `mobile-api.ts`).
+ * Tables: migrations/0050_story_branches.sql.
  */
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import type { Sql } from "@/lib/db";
 import { authMiddleware } from "@/lib/auth/middleware";
+import {
+  loadScene,
+  requireSceneManager,
+  requireScenePlay,
+  requireSceneRead,
+  storytellerWrites,
+  tryStoryteller,
+  turnsForPrompt,
+} from "./ai-features";
+import { AiUnavailableError, chatComplete } from "./ai.server";
+import { guard } from "./guard";
+import { branchPrompt, parseBranches } from "./roleplay";
+import { scanText } from "./safety";
 import { internals } from "./server";
+import { castVote, currentRound, readBranches, rewindTo, roundHasOptions, saveBranchOptions, winningOption } from "./story.server";
 
 type Authed = { userId: string };
+type Scene = Awaited<ReturnType<typeof loadScene>>;
 
-/** Serializable story turn shape (mirrors the mobile client's StoryTurn). */
-type StoryTurnOut = {
-  id: number;
-  characterId: string;
-  characterName: string;
-  characterArchetype: string;
-  hue: number;
-  kind: "dialogue" | "narrator" | "director";
-  text: string;
-  directorNote?: string;
-  createdAt: string;
+export type StoryBranches = {
+  /** The turn these options follow (0 before the story has any turns). */
+  round: number;
+  options: { id: number; label: string; votes: number; votedByMe: boolean }[];
+  /** The option the viewer voted for this round, or null. */
+  myVote: number | null;
+  /** The viewer may ask the storyteller for options and continue with the winner (in the cast, or the creator). */
+  canSteer: boolean;
+  /** The viewer may vote (an active member, and the story is open). */
+  canVote: boolean;
 };
 
-const slugSchema = z.string().min(1).max(128);
-const sceneSchema = z.object({ slug: slugSchema, sceneId: z.number().int().min(0) });
+const sceneInput = z.object({ sceneId: z.number().int().positive() });
 
-async function requireStoryAccess(sql: Sql, userId: string, slug: string) {
-  const member = await internals.membershipOf(sql, userId, slug);
-  if (!member || member.status !== "active")
-    throw new Error("Join the community to take part in its stories.");
-  return member;
+function inCastOrCreator(scene: Scene, userId: string) {
+  return scene.row.creator_id === userId || scene.cast.some((c) => c.user_id === userId);
 }
 
-/**
- * Records that a story scene was rewound to a checkpoint. Checkpoints are
- * authored on the client; the server keeps the canonical "current checkpoint"
- * pointer per scene so peers and future sessions converge on the same branch.
- */
-export const rewindAiStoryCheckpoint = createServerFn({ method: "POST" })
+function isOpen(scene: Scene) {
+  return scene.row.status === "open" && !scene.row.held;
+}
+
+async function branchesFor(sql: Sql, scene: Scene, userId: string, canVote: boolean): Promise<StoryBranches> {
+  const round = await currentRound(sql, scene.row.id);
+  const options = await readBranches(sql, scene.row.id, round, userId);
+  return {
+    round,
+    options,
+    myVote: options.find((o) => o.votedByMe)?.id ?? null,
+    canSteer: canVote && inCastOrCreator(scene, userId),
+    canVote,
+  };
+}
+
+/** The current round's options and vote counts. Anyone who can read the story can see them. */
+export const getAiStoryBranches = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
-  .validator(sceneSchema.extend({ checkpointId: z.string().min(1).max(128) }))
-  .handler(async ({ context, data }) => {
+  .validator((d: { sceneId: number }) => sceneInput.parse(d))
+  .handler(async ({ context, data }): Promise<StoryBranches> => {
     const sql = await internals.db();
     const { userId } = context as Authed;
-    await requireStoryAccess(sql, userId, data.slug);
-    await sql`insert into story_scenes(community_slug, scene_id, current_checkpoint_id, updated_by, updated_at)
-      values(${data.slug}, ${data.sceneId}, ${data.checkpointId}, ${userId}, now())
-      on conflict (community_slug, scene_id)
-      do update set current_checkpoint_id = ${data.checkpointId}, updated_by = ${userId}, updated_at = now()`;
-    // Turns live on the client that authored the checkpoint; the canonical
-    // pointer above is what lets other devices follow the rewind.
-    const turns: StoryTurnOut[] = [];
-    return { ok: true, restoredTurnId: 0, turns };
+    const scene = await loadScene(sql, data.sceneId);
+    const m = await requireSceneRead(sql, userId, scene.row.community_id);
+    return branchesFor(sql, scene, userId, m?.status === "active" && isOpen(scene));
   });
 
 /**
- * Toggles the caller's vote on a story branch option and returns the fresh
- * tallies for every option voted on in the scene.
+ * Asks the AI storyteller for "what happens next" options for the current round. Runs at most once per round:
+ * if options already exist they are returned as they are, so two players tapping at once cost one AI reply.
  */
+export const proposeAiStoryBranches = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { sceneId: number }) => sceneInput.parse(d))
+  .handler(async ({ context, data }): Promise<StoryBranches> => {
+    const sql = await internals.db();
+    const { userId } = context as Authed;
+    const scene = await loadScene(sql, data.sceneId);
+    await requireScenePlay(sql, userId, scene.row.community_id);
+    if (!isOpen(scene)) throw new Error("This story has ended.");
+    if (!inCastOrCreator(scene, userId)) throw new Error("Pick a character to play first.");
+    const round = await currentRound(sql, scene.row.id);
+    if (!(await roundHasOptions(sql, scene.row.id, round))) {
+      await guard(userId, "ai");
+      const turns = await turnsForPrompt(sql, scene.row.id);
+      const cast = scene.cast.map((c) => ({ name: c.character_name, player: c.user_id }));
+      const header = { title: scene.row.title, source: scene.row.source, premise: scene.row.premise, characters: scene.characters };
+      let reply: string;
+      try {
+        reply = await chatComplete(sql, branchPrompt(header, cast, turns), { maxTokens: 220 });
+      } catch (error) {
+        if (error instanceof AiUnavailableError) throw new Error(error.message);
+        throw new Error("The AI storyteller could not suggest options. Try again in a moment.");
+      }
+      // Options go through the same text check as members' writing; any that fail are left out.
+      const labels = parseBranches(reply).filter((label) => !scanText(label));
+      if (labels.length < 2) throw new Error("The AI storyteller could not suggest options. Try again in a moment.");
+      await saveBranchOptions(sql, scene.row.id, round, labels);
+    }
+    return branchesFor(sql, scene, userId, true);
+  });
+
+/** Votes for an option in the current round (moving an earlier vote), or removes the vote if it is already there. */
 export const voteAiStoryBranch = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator(sceneSchema.extend({ optionId: z.string().min(1).max(128) }))
+  .validator((d: { sceneId: number; optionId: number }) => sceneInput.extend({ optionId: z.number().int().positive() }).parse(d))
+  .handler(async ({ context, data }): Promise<StoryBranches> => {
+    const sql = await internals.db();
+    const { userId } = context as Authed;
+    const scene = await loadScene(sql, data.sceneId);
+    await requireScenePlay(sql, userId, scene.row.community_id);
+    if (!isOpen(scene)) throw new Error("This story has ended.");
+    await castVote(sql, scene.row.id, userId, data.optionId);
+    return branchesFor(sql, scene, userId, true);
+  });
+
+/**
+ * The storyteller continues the story in the direction with the most votes (ties go to the option offered first).
+ * The new narration starts the next round.
+ */
+export const applyAiStoryBranch = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { sceneId: number }) => sceneInput.parse(d))
   .handler(async ({ context, data }) => {
     const sql = await internals.db();
     const { userId } = context as Authed;
-    await requireStoryAccess(sql, userId, data.slug);
-    const existing = await sql`select 1 from story_votes
-      where community_slug = ${data.slug} and scene_id = ${data.sceneId}
-        and option_id = ${data.optionId} and user_id = ${userId} limit 1`;
-    if (existing.length)
-      await sql`delete from story_votes
-        where community_slug = ${data.slug} and scene_id = ${data.sceneId}
-          and option_id = ${data.optionId} and user_id = ${userId}`;
-    else
-      await sql`insert into story_votes(community_slug, scene_id, option_id, user_id)
-        values(${data.slug}, ${data.sceneId}, ${data.optionId}, ${userId})
-        on conflict do nothing`;
-    const rows = await sql<{ option_id: unknown; votes: unknown; voted_by_me: unknown }>`
-      select v.option_id,
-        count(*) as votes,
-        bool_or(v.user_id = ${userId}) as voted_by_me
-      from story_votes v
-      where v.community_slug = ${data.slug} and v.scene_id = ${data.sceneId}
-      group by v.option_id
-      order by count(*) desc, v.option_id asc`;
-    return {
-      ok: true,
-      options: rows.map((r) => ({
-        id: String(r.option_id),
-        votes: Number(r.votes),
-        votedByMe: Boolean(r.voted_by_me),
-      })),
-    };
+    const scene = await loadScene(sql, data.sceneId);
+    await requireScenePlay(sql, userId, scene.row.community_id);
+    if (!isOpen(scene)) throw new Error("This story has ended.");
+    if (!inCastOrCreator(scene, userId)) throw new Error("Pick a character to play first.");
+    const chosen = await winningOption(sql, scene.row.id);
+    if (!chosen) throw new Error("Nobody has voted yet.");
+    await guard(userId, "ai");
+    const aiError = await tryStoryteller(() => storytellerWrites(sql, scene, "narration", chosen));
+    if (aiError) throw new Error(aiError);
+    return { ok: true as const, chosen };
+  });
+
+/**
+ * Rewinds the story to an earlier turn (the checkpoint): every later turn is hidden for everyone and the story
+ * continues from there. Hidden turns are kept, not deleted. Only the story's creator or a moderator can rewind.
+ */
+export const rewindAiStoryCheckpoint = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { sceneId: number; turnId: number }) => sceneInput.extend({ turnId: z.number().int().positive() }).parse(d))
+  .handler(async ({ context, data }) => {
+    const sql = await internals.db();
+    const { userId } = context as Authed;
+    const scene = await requireSceneManager(sql, userId, data.sceneId);
+    if (!isOpen(scene)) throw new Error("This story has ended.");
+    const hidden = await rewindTo(sql, data.sceneId, data.turnId);
+    return { ok: true as const, hidden };
   });

@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Stack, router, useLocalSearchParams } from "expo-router";
 import { useState } from "react";
-import { Alert, Switch, View } from "react-native";
+import { Alert, Pressable, Switch, View } from "react-native";
 import { api } from "@/api/endpoints";
 import type { RoleplayTurn } from "@/api/types";
 import { withCommunityTheme } from "@/components/CommunityTheme";
+import { StoryVote } from "@/components/community/StoryVote";
 import { Avatar, Button, Card, Chip, ErrorState, Field, Loading, Screen, Txt } from "@/components/ui";
 import { useAction } from "@/lib/errors";
 import { tellIfHeld } from "@/lib/held";
@@ -58,6 +59,19 @@ function Scene() {
     await api.deleteScene(id);
     router.back();
   });
+  const [rewind] = useAction(
+    async (turnId: number) => {
+      const res = await api.rewindStory(id, turnId);
+      Alert.alert("Story rewound", `${res.hidden} later part${res.hidden === 1 ? " was" : "s were"} hidden. The story continues from here.`);
+      await q.refetch();
+    },
+    { errorTitle: "Couldn't rewind" },
+  );
+  const askRewind = (turnId: number) =>
+    Alert.alert("Rewind to here?", "Everything after this point is hidden for everyone and the story continues from here.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Rewind", style: "destructive", onPress: () => void rewind(turnId) },
+    ]);
 
   if (q.isPending) return <Loading />;
   if (q.isError || !q.data) return <ErrorState error={q.error} onRetry={() => void q.refetch()} />;
@@ -104,8 +118,13 @@ function Scene() {
       ) : null}
 
       <Txt variant="label" tone="subtle">The story so far</Txt>
-      {s.turns.map((t) => <TurnView key={t.id} turn={t} />)}
+      {s.turns.map((t, i) => (
+        <TurnView key={t.id} turn={t} onRewind={s.canManage && isOpen && i < s.turns.length - 1 ? () => askRewind(t.id) : undefined} />
+      ))}
       {!s.turns.length ? <Txt tone="muted">Nothing has happened yet.</Txt> : null}
+
+      {/* Voting on the next direction sits right under the story, where everyone reads it. */}
+      {isOpen && storyteller ? <StoryVote sceneId={id} onStoryChanged={() => void q.refetch()} /> : null}
 
       {isOpen && s.myCharacter ? (
         <Card>
@@ -124,7 +143,7 @@ function Scene() {
       {isOpen && storyteller && (s.myCharacter || s.canManage) ? (
         <>
           <Card>
-            <Txt variant="heading">What happens next?</Txt>
+            <Txt variant="heading">Or suggest your own twist</Txt>
             <Field value={nudge} onChangeText={setNudge} maxLength={200} placeholder="Optional twist, e.g. a storm hits" />
             <Button label="Continue the story" small variant="secondary" busy={continuing} disabled={busy} onPress={() => void next()} />
           </Card>
@@ -157,13 +176,19 @@ function Scene() {
   );
 }
 
-function TurnView({ turn }: { turn: RoleplayTurn }) {
+function TurnView({ turn, onRewind }: { turn: RoleplayTurn; onRewind?: () => void }) {
   const theme = useTheme();
+  const rewindLink = onRewind ? (
+    <Pressable onPress={onRewind} accessibilityRole="button" accessibilityLabel="Rewind the story to here" hitSlop={8} style={{ alignSelf: "flex-start", minHeight: 28, justifyContent: "center" }}>
+      <Txt variant="caption" tone="accent">↺ Rewind to here</Txt>
+    </Pressable>
+  ) : null;
   if (turn.kind === "ending") {
     return (
       <View style={{ borderWidth: 2, borderColor: theme.accent, borderRadius: radius.lg, padding: space.md, gap: space.xs }}>
         <Txt variant="label" tone="accent">An alternate ending</Txt>
         <Txt>{turn.body}</Txt>
+        {rewindLink}
       </View>
     );
   }
@@ -172,6 +197,7 @@ function TurnView({ turn }: { turn: RoleplayTurn }) {
       <View style={{ backgroundColor: theme.tint, borderRadius: radius.lg, padding: space.md, gap: space.xs }}>
         <Txt variant="caption" tone="subtle">Storyteller</Txt>
         <Txt style={{ fontStyle: "italic" }}>{turn.body}</Txt>
+        {rewindLink}
       </View>
     );
   }
@@ -181,6 +207,7 @@ function TurnView({ turn }: { turn: RoleplayTurn }) {
       <Card style={{ flex: 1 }}>
         <Txt><Txt variant="heading">{turn.character}</Txt>  <Txt variant="caption" tone="subtle">played by {turn.author.name}</Txt></Txt>
         <Txt>{turn.body}</Txt>
+        {rewindLink}
       </Card>
     </View>
   );

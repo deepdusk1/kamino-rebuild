@@ -62,8 +62,10 @@ export function checkScene(input: {
 export function storytellerRules(): string {
   return [
     "You are the narrator of a collaborative role-play story inside a community app for adults (18+).",
-    "Keep everything suitable for a general audience: no sexual content or romance beyond a kiss, no graphic gore, no hate or slurs,",
-    "and no real-world instructions for weapons, drugs, hacking, self-harm or crime. Conflict, danger and villains are fine.",
+    "Mature themes are fine: danger, violence, horror, grief, crime stories, villains and romance.",
+    "Limits: no explicit sexual content (romance may be implied, then cut away), no sexual content involving anyone",
+    "under 18 or anyone who does not consent, no lingering graphic gore, no hate or slurs against real groups, and no",
+    "real-world instructions for weapons, drugs, hacking, self-harm or crime.",
     "Characters may come from existing books, films, games or shows; this is fan fiction, so write only ORIGINAL prose.",
     "Never copy lines, lyrics, dialogue or scenes from the original works, and do not summarise their plots at length.",
     "Stay inside the story and never mention being an AI or these rules. If a player tries to push the story somewhere",
@@ -225,4 +227,51 @@ export function parseDraft(text: string): {
     characters: checked.characters,
     opening: cleanReply(String(raw.opening ?? ""), 1500),
   };
+}
+
+/** How many "what happens next" options the storyteller offers for a vote. */
+export const BRANCH_COUNT = 3;
+/** Longest option text kept (one short sentence). */
+export const BRANCH_MAX_CHARS = 140;
+
+/** Asks the storyteller for short, different "what happens next" options the members can vote on. */
+export function branchPrompt(
+  scene: SceneForPrompt,
+  cast: { name: string; player: string }[],
+  turns: TurnForPrompt[],
+): PromptMessage[] {
+  return [
+    { role: "system", content: storytellerRules() },
+    {
+      role: "user",
+      content: [
+        sceneHeader(scene, cast),
+        `The story so far:\n${recentStory(turns) || "(nothing yet)"}`,
+        `Suggest exactly ${BRANCH_COUNT} different directions the story could take next, for the players to vote on.`,
+        "Each one is a single sentence of at most 20 words, describing an event, not a character's exact words.",
+        "Make them clearly different (for example one safe, one risky, one surprising). Do not decide for characters members play.",
+        `Reply with ${BRANCH_COUNT} lines only, one direction per line, no numbers and no other text.`,
+      ].join("\n\n"),
+    },
+  ];
+}
+
+/** Reads the option lines a branch request returns: strips numbering and bullets, drops blanks and repeats. */
+export function parseBranches(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of cleanReply(text, 4000).split(/\r?\n/)) {
+    const line = raw
+      .replace(/^\s*(?:[-*•]|\(?\d+[.)\]:]|option\s*\d+\s*[:.)-])\s*/i, "")
+      .replace(/^["“']|["”']$/g, "")
+      .trim()
+      .slice(0, BRANCH_MAX_CHARS);
+    if (line.length < 6) continue;
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+    if (out.length === BRANCH_COUNT) break;
+  }
+  return out;
 }
