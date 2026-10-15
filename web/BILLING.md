@@ -59,11 +59,15 @@ The browser return URL never grants benefits. A valid signed event causes a fres
 
 One pending order is allowed per buyer, beneficiary and offer. Retries reuse that order's provider idempotency key. An open provider checkout stays the only checkout even if the local order is old. Only provider-confirmed expiration releases the pending slot. A completed checkout waits for payment reconciliation instead of creating a second checkout.
 
-If an order is older than 24 hours and its provider response/session ID was lost, checkout requires **support review**. A maintainer must verify that order's Stripe metadata and payment state before repair; opening another checkout blindly could duplicate a payment. There is currently no automated repair screen for this case. Stripe may remove old idempotency keys after its retention period; see [Stripe idempotent requests](https://docs.stripe.com/api/idempotent_requests).
+If an order has no saved session ID, the buyer never received a checkout link. Within 24 hours a retry reuses the same idempotency key, so Stripe returns the same session if it made one. After 24 hours the order is marked `expired` and a fresh order starts: Stripe sessions last at most 24 hours and nobody had that link, so nothing could have been paid. A pending order from the other mode (a sandbox order left over after switching to live, or the reverse) also expires, because this server's keys can never complete it.
+
+Every order records the mode it was created in (`test_mode`). Premium, paid rooms, paid posts, communities and events only honour purchases from the server's current mode: real purchases in live mode, sandbox purchases in test mode. Migration `0056_billing_fixes.sql` repairs live orders saved before this rule existed.
 
 Webhook delivery is durable and idempotent. In-progress or failed processing returns `503` so the provider retries. Processed duplicates return success. Claim tokens prevent an expired worker from writing after takeover, and order revisions reject a stale update that raced with a newer payment. Raw webhook bodies are not stored; the event ID, payload hash and processing state are retained.
 
-Refunds and disputes revoke access, including when they arrive before checkout completion. An older renewal refund maps through its invoice to the subscription. Partial refunds currently revoke the whole offer entitlement; proportional access/refund accounting is not implemented. A late completion event cannot restore a refunded, disputed or cancelled order. Expired subscriptions fail access checks without requiring a member to open the app.
+A full refund or a dispute revokes access, including when it arrives before checkout completion. An older renewal refund maps through its invoice to the subscription. For a subscription, the refund or dispute also cancels the subscription at Stripe, so the member is not charged again for access they no longer have. A partial refund is treated as a goodwill credit: access stays. A late completion event cannot restore a refunded, disputed or cancelled order. A dispute the platform later wins does not restore access automatically. Expired subscriptions fail access checks without requiring a member to open the app.
+
+Cancelling in the Stripe billing portal sets the subscription to end at the period end: access continues until then, and purchase history shows "ends" instead of "renews" (`billing_orders.renews`). Creator earnings are credited once per charge (`creator_earnings.payment_ref`, migration `0057`), so every monthly renewal pays the creator and a refund reverses only the refunded charge. Receipts are read from Stripe on demand (`getOrderReceipt`) and only open on `pay.stripe.com` / `invoice.stripe.com` pages, for the buyer's own orders.
 
 ## Verification
 
@@ -82,7 +86,7 @@ A configured Stripe test-account end-to-end run has not been performed in this i
 
 Account deletion closes pending local orders, revokes that account's benefits, removes personal uploads and replaces retained accounting identities with a deletion pseudonym. Other members keep already-paid gifts with their existing expiry; creator-owned shared resources remain, with offers unpublished. Privacy-closed orders reject late fulfillment/refund writes. Retained sandbox order rows have no personal email/name.
 
-This flow does not cancel a subscription at the external payment provider. Operators must cancel the associated subscription in Stripe and reconcile any refund separately before removing an account with recurring payments. In sandbox mode the app accepts test-mode payments only. Complete provider cancellation, financial retention policy and store billing review before enabling live mode.
+Before any rows are erased, deletion cancels every subscription the person pays for at Stripe (`endSubscriptionsForAccount`). If Stripe cannot be reached, deletion stops with an error and the person can retry, rather than leaving a subscription charging an account that no longer exists. Refunds are still handled separately by operators. In sandbox mode the app accepts test-mode payments only. Complete provider cancellation, financial retention policy and store billing review before enabling live mode.
 
 ## Live mode and creator payouts (added October 5, 2026)
 

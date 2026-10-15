@@ -2,6 +2,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import * as billing from "@/lib/kamino/billing-v9";
+import {
+  accessLabel,
+  checkoutButtonLabel,
+  formatPrice,
+  orderStatusLabel,
+} from "@/lib/kamino/billing-labels";
 
 const card = "rounded-2xl border border-border bg-surface p-4 space-y-3";
 const button =
@@ -18,14 +24,28 @@ function redirectToStripe(value: string) {
     throw new Error("Checkout is unavailable.");
   window.location.assign(url.href);
 }
+/** Receipts only ever open on Stripe's own receipt pages. */
+function receiptHref(value: string) {
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" ||
+    !["pay.stripe.com", "invoice.stripe.com"].includes(url.hostname) ||
+    url.username ||
+    url.password
+  )
+    throw new Error("The receipt link isn't valid.");
+  return url.href;
+}
 export function TestCheckout({
   offerId,
   kind,
   enabled,
+  mode,
 }: {
   offerId: number;
   kind: string;
   enabled: boolean;
+  mode: "disabled" | "test" | "live";
 }) {
   const [recipient, setRecipient] = useState(""),
     [busy, setBusy] = useState(false);
@@ -75,10 +95,13 @@ export function TestCheckout({
             ? "Payments unavailable"
             : !supported
               ? "Coming soon"
-              : "Open test checkout"}
+              : checkoutButtonLabel(kind, mode)}
       </button>
-      {enabled && supported ? (
+      {enabled && supported && mode === "test" ? (
         <p className="text-xs text-muted">Sandbox checkout. No real money or creator payouts.</p>
+      ) : null}
+      {enabled && supported && mode === "live" && (kind === "membership" || kind === "premium") ? (
+        <p className="text-xs text-muted">Monthly. Cancel any time from Purchases &amp; subscriptions.</p>
       ) : null}
     </div>
   );
@@ -97,7 +120,26 @@ export function BillingPanel({ creator = false }: { creator?: boolean }) {
     cache = useQueryClient();
   const [selected, setSelected] = useState(""),
     [offerId, setOfferId] = useState(""),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [receiptFor, setReceiptFor] = useState<string | null>(null);
+  const live = status.data?.mode === "live";
+  async function receipt(orderId: string) {
+    // Open the tab during the click so pop-up blockers allow it, then point it at the receipt.
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
+    setReceiptFor(orderId);
+    try {
+      const result = await billing.getOrderReceipt({ data: { orderId } });
+      const href = receiptHref(result.url);
+      if (tab) tab.location.href = href;
+      else window.location.assign(href);
+    } catch (error) {
+      tab?.close();
+      toast.error(error instanceof Error ? error.message : "Could not open the receipt.");
+    } finally {
+      setReceiptFor(null);
+    }
+  }
   const target = choices.data?.resources.find((r) => `${r.kind}:${r.resourceId}` === selected);
   const matching =
     choices.data?.offers.filter((o) => o.published && o.communityId === target?.communityId) ?? [];
@@ -157,17 +199,17 @@ export function BillingPanel({ creator = false }: { creator?: boolean }) {
                   })
                 }
               >
-                Manage test subscription
+                {live ? "Manage or cancel subscription" : "Manage test subscription"}
               </button>
             ) : null}
             <h3 className="font-semibold">Active access</h3>
             {history.data.entitlements.length ? (
-              history.data.entitlements.map((e, i) => (
-                <div key={`${e.offerId}:${i}`} className="rounded-xl bg-bg p-3">
+              history.data.entitlements.map((e) => (
+                <div key={e.orderId} className="rounded-xl bg-bg p-3">
                   <strong>{e.title}</strong>
                   <p className="text-sm">
-                    {e.state} · test mode
-                    {e.expiresAt ? ` · until ${new Date(e.expiresAt).toLocaleDateString()}` : ""}
+                    {accessLabel(e)}
+                    {e.testMode ? " · test" : ""}
                   </p>
                 </div>
               ))
@@ -180,10 +222,21 @@ export function BillingPanel({ creator = false }: { creator?: boolean }) {
                 <div key={o.id} className="rounded-xl bg-bg p-3">
                   <strong>{o.title}</strong>
                   <p className="text-sm">
-                    {(o.priceMinor / 100).toFixed(2)} {o.currency.toUpperCase()} · {o.status} · test
-                    mode
+                    {formatPrice(o.priceMinor, o.currency)}
+                    {o.subscription ? " / month" : ""} · {orderStatusLabel(o.status)}
+                    {o.renews === false ? " · won't renew" : ""}
+                    {o.testMode ? " · test" : ""}
                   </p>
                   <p className="text-xs text-muted">{new Date(o.createdAt).toLocaleString()}</p>
+                  {o.receipt ? (
+                    <button
+                      className="k-focus mt-2 text-sm font-bold text-violet disabled:opacity-40"
+                      disabled={receiptFor !== null}
+                      onClick={() => void receipt(o.id)}
+                    >
+                      {receiptFor === o.id ? "Opening receipt…" : "View receipt"}
+                    </button>
+                  ) : null}
                 </div>
               ))
             ) : (

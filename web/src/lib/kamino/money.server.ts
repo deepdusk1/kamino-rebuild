@@ -51,41 +51,50 @@ export function payoutHoldDays(): number {
 export async function creditCreatorEarnings(sql: Sql, orderId: string, testMode: boolean): Promise<boolean> {
   if (testMode) return false;
   const order = (await sql<Row>`
-    select id, beneficiary_id, seller_id, price_minor, currency, status
+    select id, beneficiary_id, seller_id, price_minor, currency, status, stripe_payment_intent_id
     from billing_orders where id = ${orderId} and status = 'paid'`)[0];
   if (!order) return false;
+  // One credit per charge: every monthly renewal of a subscription earns the creator again,
+  // while a replayed webhook for the same charge credits nothing new.
+  const paymentRef = order.stripe_payment_intent_id ? String(order.stripe_payment_intent_id) : "";
   const gross = Number(order.price_minor ?? 0);
   if (gross <= 0) return false;
   const fee = Math.floor((gross * platformFeePercent()) / 100);
   const inserted = await sql`
-    insert into creator_earnings(creator_id, order_id, gross_minor, fee_minor, net_minor, currency, state, released_at)
-    values(${String(order.seller_id)}, ${String(order.id)}, ${gross}, ${fee}, ${gross - fee}, ${String(order.currency)}, 'available',
+    insert into creator_earnings(creator_id, order_id, payment_ref, gross_minor, fee_minor, net_minor, currency, state, released_at)
+    values(${String(order.seller_id)}, ${String(order.id)}, ${paymentRef}, ${gross}, ${fee}, ${gross - fee}, ${String(order.currency)}, 'available',
       now() + (${payoutHoldDays()} || ' days')::interval)
-    on conflict (order_id) where net_minor >= 0 do nothing returning id`;
+    on conflict (order_id, payment_ref) where net_minor >= 0 do nothing returning id`;
   return inserted.length > 0;
 }
 
 /**
  * Reverses the earnings of an order that was refunded or disputed. Rows still in the pool are
  * reversed directly; rows already paid out are offset by a negative adjustment so the balance
- * goes down until the loss is recovered. Idempotent per order (an adjustment is inserted once).
+ * goes down until the loss is recovered. Idempotent per charge (an adjustment is inserted once).
+ *
+ * `paymentRef` (the refunded charge's payment intent) limits the reversal to that one charge, so
+ * refunding one month of a subscription leaves the creator's other, delivered months alone.
  */
-export async function reverseCreatorEarnings(sql: Sql, orderId: string): Promise<void> {
+export async function reverseCreatorEarnings(sql: Sql, orderId: string, paymentRef: string | null = null): Promise<void> {
   const order = (await sql<Row>`select id, currency, status from billing_orders where id = ${orderId}`)[0];
   if (!order) return;
   const currency = String(order.currency);
+  // Credits only (net_minor >= 0): a loss booked by an earlier run must never be "reversed" by a replay.
   const rows = await sql<Row>`
-    select id, creator_id, net_minor, state from creator_earnings
-    where order_id = ${orderId} and state in ('available','reserved','paid')`;
+    select id, creator_id, net_minor, state, payment_ref from creator_earnings
+    where order_id = ${orderId} and net_minor >= 0 and state in ('available','reserved','paid')
+      and (${paymentRef}::text is null or payment_ref = ${paymentRef}::text)`;
   for (const row of rows) {
     if (row.state === 'paid') {
       // Already sent to the creator: book the loss against future earnings instead. The guard
       // keeps webhook replays from booking the same loss twice.
-      const existing = await sql`select 1 from creator_earnings where order_id = ${orderId} and net_minor < 0 limit 1`;
+      const ref = String(row.payment_ref ?? "");
+      const existing = await sql`select 1 from creator_earnings where order_id = ${orderId} and payment_ref = ${ref} and net_minor < 0 limit 1`;
       if (!existing.length)
         await sql`
-          insert into creator_earnings(creator_id, order_id, gross_minor, fee_minor, net_minor, currency, state, released_at)
-          values(${row.creator_id}, ${orderId}, 0, 0, ${-Math.abs(Number(row.net_minor))}, ${currency}, 'available', now())`;
+          insert into creator_earnings(creator_id, order_id, payment_ref, gross_minor, fee_minor, net_minor, currency, state, released_at)
+          values(${row.creator_id}, ${orderId}, ${ref}, 0, 0, ${-Math.abs(Number(row.net_minor))}, ${currency}, 'available', now())`;
     }
     await sql`update creator_earnings set state = 'reversed', released_at = now() where id = ${Number(row.id)}`;
   }
@@ -311,8 +320,9 @@ export async function reconcileStuckPayouts(
 export async function reconcileMissingEarnings(sql: Sql): Promise<number> {
   const missing = await sql<Row>`
     select o.id, o.test_mode from billing_orders o
-    where o.status = 'paid' and o.created_at > now() - interval '45 days'
-      and not exists(select 1 from creator_earnings ce where ce.order_id = o.id and ce.net_minor >= 0)
+    where o.status = 'paid' and o.test_mode = false and o.updated_at > now() - interval '45 days'
+      and not exists(select 1 from creator_earnings ce where ce.order_id = o.id
+        and ce.payment_ref = coalesce(o.stripe_payment_intent_id, '') and ce.net_minor >= 0)
     order by o.updated_at asc limit 50`;
   let credited = 0;
   for (const row of missing) {

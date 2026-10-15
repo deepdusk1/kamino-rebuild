@@ -475,6 +475,9 @@ export const readFeeds = createServerFn({ method: "GET" })
 
 /** Rows commit atomically; external object cleanup is durable and runs only after that commit. */
 async function eraseAccount(sql: Awaited<ReturnType<typeof db>>, userId: string) {
+  // Stop paid subscriptions first: once the rows are erased nobody could find them to cancel.
+  const { endSubscriptionsForAccount } = await import("./billing.server");
+  await endSubscriptionsForAccount(sql, userId);
   const { eraseAccountAtomically } = await import("./privacy-v9.server");
   await eraseAccountAtomically(sql, userId);
   const { processMediaDeletionQueue } = await import("./media-deletion.server");

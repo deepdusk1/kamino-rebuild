@@ -545,11 +545,14 @@ export const getMarketplace = createServerFn({ method: "GET" })
     const offers = await sql.query<Row>(
       `select o.id,o.kind,o.title,o.description,o.price_minor,o.currency,p.handle,p.display_name from creator_offers o join profiles p on p.user_id=o.owner_id
     left join communities c on c.id=o.community_id where o.published=true and (o.community_id is null or (${internals.communityMetadataAccessSql("$1")}))
+    and (p.min_age_confirmed_at is not null or p.user_id like 'seed:%')
+    and not exists(select 1 from identity_account_status s where s.user_id=o.owner_id and s.status<>'active' and (s.until is null or s.until>now()))
     and not exists(select 1 from blocks b where (b.blocker_id=$1 and b.blocked_id=o.owner_id) or (b.blocked_id=$1 and b.blocker_id=o.owner_id)) order by o.id desc limit 60`,
       [userId],
     );
     const { getBillingConfig } = await import("./billing.server");
-    return { offers, paymentsEnabled: getBillingConfig().enabled };
+    const config = getBillingConfig();
+    return { offers, paymentsEnabled: config.enabled, paymentsMode: config.mode };
   });
 export const requestCheckout = createServerFn({ method: "POST" })
   .middleware([authMiddleware])

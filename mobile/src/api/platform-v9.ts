@@ -46,7 +46,11 @@ export const platform = {
     rpc<Hub>("getDiscoveryHub", data),
   creator: () => rpc<Creator>("getCreatorDashboard"),
   market: () =>
-    rpc<{ offers: Row[]; paymentsEnabled: boolean }>("getMarketplace"),
+    rpc<{
+      offers: Row[];
+      paymentsEnabled: boolean;
+      paymentsMode: "disabled" | "test" | "live";
+    }>("getMarketplace"),
   admin: () => rpc<Admin>("getAdminDashboard"),
   support: () => rpc<Row[]>("getMySupportTickets"),
   taxonomy: () => rpc<Row[]>("getCustomTaxonomy"),
@@ -155,16 +159,24 @@ export const platform = {
         priceMinor: number;
         currency: string;
         status: string;
-        testMode: true;
+        testMode: boolean;
         subscription: boolean;
+        /** Subscriptions only: true = bills again, false = cancelled and ends at the period end. */
+        renews: boolean | null;
+        /** A Stripe receipt can be opened for this order. */
+        receipt: boolean;
         createdAt: string;
       }[];
       entitlements: {
+        orderId: string;
         offerId: number;
         title: string;
         state: string;
+        /** Gives access right now (active and not past its end date). */
+        active: boolean;
         expiresAt: string | null;
-        testMode: true;
+        renews: boolean | null;
+        testMode: boolean;
       }[];
       requirements: {
         kind: "community" | "post" | "chat" | "event";
@@ -195,4 +207,7 @@ export const platform = {
   ) => rpc("setPaidResource", { kind, resourceId, offerId }),
   supporterBadge: (visible: boolean) =>
     rpc("setSupporterBadgeVisibility", { visible }),
+  /** Stripe receipt page for one of your own orders (pay.stripe.com / invoice.stripe.com). */
+  receipt: (orderId: string) =>
+    rpc<{ url: string }>("getOrderReceipt", { orderId }),
 };

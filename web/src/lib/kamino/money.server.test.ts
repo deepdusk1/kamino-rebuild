@@ -309,3 +309,39 @@ test("an interrupted payout reconciles to paid and never returns earnings to the
   const earnings = await sql`select state from creator_earnings where creator_id=${creator}`;
   assert.equal(String(earnings[0]!.state), "paid", "reserved earnings reconcile to paid, never back to available");
 });
+
+test("every subscription renewal earns the creator; refunding one month reverses only that month", async () => {
+  const sql = await makeDb();
+  const creator = await person(sql);
+  const buyer = await person(sql);
+  liveEnv();
+  const order = await paidOrder(sql, buyer, creator, buyer, 1000, false);
+  await sql`update billing_orders set checkout_mode='subscription', stripe_payment_intent_id='pi_Month1' where id=${order}`;
+  assert.equal(await creditCreatorEarnings(sql, order, false), true);
+  assert.equal(await creditCreatorEarnings(sql, order, false), false, "a replayed webhook for the same month credits nothing");
+  await sql`update billing_orders set stripe_payment_intent_id='pi_Month2' where id=${order}`;
+  assert.equal(await creditCreatorEarnings(sql, order, false), true, "the renewal is a new charge, so it earns again");
+  await reverseCreatorEarnings(sql, order, "pi_Month1");
+  const rows = await sql`select payment_ref, state from creator_earnings where order_id=${order} order by payment_ref`;
+  assert.deepEqual(rows.map((r) => [r.payment_ref, r.state]), [["pi_Month1", "reversed"], ["pi_Month2", "available"]]);
+});
+
+test("replaying a refund after a payout never cancels the loss it booked", async () => {
+  const sql = await makeDb();
+  const creator = await person(sql);
+  const buyer = await person(sql);
+  liveEnv();
+  const order = await paidOrder(sql, buyer, creator, buyer, 1000, false);
+  await creditCreatorEarnings(sql, order, false);
+  const api = (async (path: string, method = "GET") => {
+    if (path === "/v1/accounts" && method === "POST") return { id: "acct_x", payouts_enabled: true };
+    if (path.startsWith("/v1/accounts/")) return { id: "acct_x", payouts_enabled: true };
+    if (path === "/v1/transfers") return { id: "tr_replay" };
+    throw new Error(`unexpected path ${path}`);
+  }) as unknown as StripeRequest;
+  await payOutCreator(sql, creator, api);
+  await reverseCreatorEarnings(sql, order);
+  await reverseCreatorEarnings(sql, order);
+  const available = await sql`select coalesce(sum(net_minor),0) as n from creator_earnings where creator_id=${creator} and state='available'`;
+  assert.equal(Number(available[0]!.n), -900, "the loss stays booked once, however often the refund event arrives");
+});

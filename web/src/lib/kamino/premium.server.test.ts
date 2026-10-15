@@ -15,6 +15,14 @@ test("premium benefits require paid, unexpired premium access for this beneficia
         .rows[0]?.active;
     assert.equal(await active(), true);
     assert.equal(await active("other"), false);
+    // A sandbox purchase never gives premium once real payments are on.
+    const live = async () =>
+      (await pg.query<{ active: boolean }>(`select ${premiumActiveSql("$1", true)} as active`, ["buyer"])).rows[0]?.active;
+    assert.equal(await live(), false);
+    await pg.exec("update billing_orders set test_mode=false;update billing_entitlements set test_mode=false");
+    assert.equal(await live(), true);
+    assert.equal(await active(), false);
+    await pg.exec("update billing_orders set test_mode=true;update billing_entitlements set test_mode=true");
     for (const statement of [
       "update billing_orders set kind='membership'",
       "update billing_orders set kind='premium',status='pending'",

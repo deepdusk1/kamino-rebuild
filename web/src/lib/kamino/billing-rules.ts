@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { billingOriginFrom, liveBillingFrom } from "./billing-policy.ts";
 
 // Pin the API shape; newer webhook versions are safe because events trigger a fresh API read.
 export const STRIPE_API_VERSION = "2025-02-24.acacia";
@@ -38,30 +39,10 @@ export type BillingOrderSnapshot = {
 export function billingConfig(env: Record<string, string | undefined>): BillingConfig {
   const secretKey = env.STRIPE_SECRET_KEY?.trim() ?? "",
     webhookSecret = env.STRIPE_WEBHOOK_SECRET?.trim() ?? "";
-  let origin = "";
-  try {
-    const url = new URL(env.KAMINO_BILLING_ORIGIN ?? "");
-    if (
-      (url.protocol === "https:" ||
-        (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) &&
-      !url.username &&
-      !url.password &&
-      url.pathname === "/" &&
-      !url.search &&
-      !url.hash
-    )
-      origin = url.origin;
-  } catch {
-    /* An absent origin keeps billing disabled. */
-  }
+  const origin = billingOriginFrom(env);
   // Live mode requires the explicit opt-in flag on top of a live key: a pasted sk_live_ key alone
-  // must never switch the whole platform to real money.
-  const live =
-    env.KAMINO_PAYMENTS_ENABLED === "true" &&
-    env.KAMINO_BILLING_MODE === "live" &&
-    /^sk_live_[A-Za-z0-9]{16,}$/.test(secretKey) &&
-    /^whsec_[A-Za-z0-9]{16,}$/.test(webhookSecret) &&
-    Boolean(origin);
+  // must never switch the whole platform to real money. Access rules share this exact check.
+  const live = liveBillingFrom(env);
   const test =
     env.KAMINO_PAYMENTS_ENABLED === "true" &&
     /^sk_test_[A-Za-z0-9]{16,}$/.test(secretKey) &&
@@ -235,4 +216,41 @@ export function trustedStripeRedirect(value: unknown): string {
   )
     throw new Error("Checkout is unavailable.");
   return url.href;
+}
+
+/** Stripe-hosted receipt pages only: card receipts (pay.stripe.com) and subscription invoices (invoice.stripe.com). */
+export function trustedReceiptUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== "https:" ||
+      !["pay.stripe.com", "invoice.stripe.com"].includes(url.hostname) ||
+      url.username ||
+      url.password
+    )
+      return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a refund or dispute does to access. Only a full refund ends access; a partial refund is a
+ * goodwill credit and the buyer keeps what they paid for. Any open dispute ends access.
+ */
+export function chargeOutcome(charge: StripeObject): "refunded" | "disputed" | null {
+  if (charge.refunded === true) return "refunded";
+  if (charge.disputed === true) return "disputed";
+  return null;
+}
+
+/** True while a subscription will bill again; false once it is set to end (cancel at period end or a fixed cancel date). */
+export function subscriptionRenews(subscription: StripeObject): boolean {
+  return (
+    ["active", "trialing", "past_due"].includes(String(subscription.status)) &&
+    subscription.cancel_at_period_end !== true &&
+    !subscription.cancel_at
+  );
 }
