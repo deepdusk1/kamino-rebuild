@@ -2,6 +2,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
+import { useQuery } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useId, useRef, useState } from "react";
 import {
@@ -25,7 +26,8 @@ import Svg, {
   Stop,
   Text as SvgText,
 } from "react-native-svg";
-import { useSession } from "@/auth/session";
+import { rpc } from "@/api/client";
+import { isCancelledSignIn, useSession } from "@/auth/session";
 import { PressableScale, Txt } from "@/components/ui";
 import { defaultCover, heroArt, interestArt, welcomeArt } from "@/lib/brandArt";
 import { errorMessage } from "@/lib/errors";
@@ -184,7 +186,12 @@ export default function Welcome() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { socialSignIn } = useSession();
+  const { socialSignIn, notice, clearNotice } = useSession();
+  // Only show the providers the server has switched on (a button that can only fail is worse than none).
+  const capabilities = useQuery({
+    queryKey: ["signInCapabilities"],
+    queryFn: () => rpc<{ google: boolean; apple: boolean }>("getSignInCapabilities"),
+  });
 
   const scrollerRef = useRef<ScrollView>(null);
   const [activeSlide, setActiveSlide] = useState<number>(0);
@@ -227,10 +234,8 @@ export default function Welcome() {
     try {
       await socialSignIn(provider);
     } catch (error) {
-      const msg = errorMessage(error);
-      if (!/cancel|dismiss/i.test(msg)) {
-        setOauthError(msg);
-      }
+      // Closing the sign-in window isn't an error worth a message.
+      if (!isCancelledSignIn(error)) setOauthError(errorMessage(error));
     } finally {
       setOauthBusy(null);
     }
@@ -453,12 +458,15 @@ export default function Welcome() {
           })}
         </View>
 
-        {/* Friendly OAuth Error Banner with Retry/Dismiss */}
-        {oauthError ? (
+        {/* Friendly OAuth Error Banner with Retry/Dismiss (also says when a session ended) */}
+        {oauthError || notice ? (
           <PressableScale
-            onPress={() => setOauthError(null)}
+            onPress={() => {
+              setOauthError(null);
+              clearNotice();
+            }}
             accessibilityRole="alert"
-            accessibilityLabel={`${oauthError}. Tap to dismiss`}
+            accessibilityLabel={`${oauthError ?? notice}. Tap to dismiss`}
             style={[
               styles.errorBanner,
               {
@@ -468,8 +476,8 @@ export default function Welcome() {
             ]}
           >
             <Ionicons name="alert-circle" size={17} color="#FDA4AF" />
-            <Txt style={styles.errorText} numberOfLines={2}>
-              {oauthError}
+            <Txt style={styles.errorText} numberOfLines={3}>
+              {oauthError ?? notice}
             </Txt>
             <Ionicons name="close" size={15} color="#FDA4AF" />
           </PressableScale>
@@ -514,58 +522,62 @@ export default function Welcome() {
         </PressableScale>
 
         {/* "Continue with Google" Dark Glass Pill Button */}
-        <PressableScale
-          onPress={() => void handleSocialSignIn("google")}
-          disabled={oauthBusy !== null}
-          accessibilityRole="button"
-          accessibilityLabel="Continue with Google"
-          scaleTo={0.98}
-          style={[
-            styles.oauthButton,
-            {
-              backgroundColor: theme.dark
-                ? "rgba(18, 17, 36, 0.86)"
-                : "rgba(21, 18, 42, 0.84)",
-              borderColor: "rgba(167, 139, 250, 0.28)",
-            },
-          ]}
-        >
-          <View style={styles.oauthIconSlot}>
-            {oauthBusy === "google" ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <GoogleGLogo size={21} />
-            )}
-          </View>
-          <Txt style={styles.oauthLabel}>Continue with Google</Txt>
-        </PressableScale>
+        {capabilities.data?.google ? (
+          <PressableScale
+            onPress={() => void handleSocialSignIn("google")}
+            disabled={oauthBusy !== null}
+            accessibilityRole="button"
+            accessibilityLabel="Continue with Google"
+            scaleTo={0.98}
+            style={[
+              styles.oauthButton,
+              {
+                backgroundColor: theme.dark
+                  ? "rgba(18, 17, 36, 0.86)"
+                  : "rgba(21, 18, 42, 0.84)",
+                borderColor: "rgba(167, 139, 250, 0.28)",
+              },
+            ]}
+          >
+            <View style={styles.oauthIconSlot}>
+              {oauthBusy === "google" ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <GoogleGLogo size={21} />
+              )}
+            </View>
+            <Txt style={styles.oauthLabel}>Continue with Google</Txt>
+          </PressableScale>
+        ) : null}
 
         {/* "Continue with Apple" Dark Glass Pill Button */}
-        <PressableScale
-          onPress={() => void handleSocialSignIn("apple")}
-          disabled={oauthBusy !== null}
-          accessibilityRole="button"
-          accessibilityLabel="Continue with Apple"
-          scaleTo={0.98}
-          style={[
-            styles.oauthButton,
-            {
-              backgroundColor: theme.dark
-                ? "rgba(18, 17, 36, 0.86)"
-                : "rgba(21, 18, 42, 0.84)",
-              borderColor: "rgba(167, 139, 250, 0.28)",
-            },
-          ]}
-        >
-          <View style={styles.oauthIconSlot}>
-            {oauthBusy === "apple" ? (
-              <ActivityIndicator color="#FFFFFF" size="small" />
-            ) : (
-              <Ionicons name="logo-apple" size={22} color="#FFFFFF" />
-            )}
-          </View>
-          <Txt style={styles.oauthLabel}>Continue with Apple</Txt>
-        </PressableScale>
+        {capabilities.data?.apple ? (
+          <PressableScale
+            onPress={() => void handleSocialSignIn("apple")}
+            disabled={oauthBusy !== null}
+            accessibilityRole="button"
+            accessibilityLabel="Continue with Apple"
+            scaleTo={0.98}
+            style={[
+              styles.oauthButton,
+              {
+                backgroundColor: theme.dark
+                  ? "rgba(18, 17, 36, 0.86)"
+                  : "rgba(21, 18, 42, 0.84)",
+                borderColor: "rgba(167, 139, 250, 0.28)",
+              },
+            ]}
+          >
+            <View style={styles.oauthIconSlot}>
+              {oauthBusy === "apple" ? (
+                <ActivityIndicator color="#FFFFFF" size="small" />
+              ) : (
+                <Ionicons name="logo-apple" size={22} color="#FFFFFF" />
+              )}
+            </View>
+            <Txt style={styles.oauthLabel}>Continue with Apple</Txt>
+          </PressableScale>
+        ) : null}
 
         {/* 4 Feature Icons Row (Find Communities, Chat & Make Friends, Create & Share, Live Rooms & Events) */}
         <View style={styles.featuresRow}>

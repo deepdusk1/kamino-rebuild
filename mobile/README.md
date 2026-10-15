@@ -120,6 +120,16 @@ You do **not** need a Mac or Android Studio: Expo builds the apps in the cloud.
 Change the app's permanent ID (`com.kelnovalabs.kamino`) in `app.config.ts` **before** the first
 store upload if you want a different one — it can never be changed afterwards.
 
+### Google and Apple sign-in
+
+- Google's consent screen in **Testing** mode only lets the test users you list sign in. Add your testers
+  (Google Cloud > APIs & Services > OAuth consent screen > Test users), or press **Publish app** before launch.
+- The server's Google client needs the redirect URI `https://<your server>/api/auth/callback/google`, and the
+  Apple Services ID the return URL `https://<your server>/api/auth/callback/apple`.
+- On iPhone, Apple sign-in uses the system sheet. In the Apple Developer portal, turn on **Sign in with Apple**
+  for the App ID `com.kelnovalabs.kamino` (EAS does this on the next build if you let it manage the App ID).
+- New Google/Apple accounts see the 18+ birthday check right after their first sign-in.
+
 ### App Store / Google Play review checklist
 
 Apple and Google reject apps with user-generated content unless these exist. They are all built in:

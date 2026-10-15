@@ -1,14 +1,18 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import * as Linking from "expo-linking";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { authRequest, rpc, setAuthToken, setUnauthorizedHandler } from "@/api/client";
-import {apiBaseUrl} from '@/api/config';
-import * as WebBrowser from 'expo-web-browser';
+import { apiBaseUrl } from "@/api/config";
 import { api } from "@/api/endpoints";
 import { YOUNG_MESSAGE } from "@/lib/age";
-import { deleteSecret, readSecret, writeSecret } from "./storage";
 import { unregisterPushDevice } from "@/lib/push";
+import { clearPendingOAuth, resumeOAuthFromLink, runCaptcha, signInWithProvider, type Provider } from "./oauth";
+import { CAPTCHA_RETURN_URL } from "./oauth-return";
+import { deleteSecret, readSecret, writeSecret } from "./storage";
 
 const TOKEN_KEY = "kamino.session-token";
+/** Who is signed in and whether they passed the 18+ check, for starting up without a connection. */
+const ACCOUNT_KEY = "kamino.session-account";
 
 /** `needsAge`: signed in, but has not passed the 18+ birthday check yet. */
 type Status = "loading" | "signedOut" | "needsAge" | "signedIn";
@@ -19,6 +23,9 @@ type Session = {
   status: Status;
   /** The signed-in user's ID (null when signed out). Used to scope per-account storage like the offline queue. */
   userId: string | null;
+  /** Shown on the sign-in screens, e.g. "Your session ended" after the server signed this phone out. */
+  notice: string | null;
+  clearNotice: () => void;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (name: string, email: string, password: string, birthday: Birthday) => Promise<void>;
   /** Sends the birthday to the server. Resolves false (and signs out) when the person is too young. */
@@ -26,10 +33,22 @@ type Session = {
   signOut: () => Promise<void>;
   requestPasswordReset: (email: string) => Promise<void>;
   verifyTwoFactor: (code: string, backup?: boolean) => Promise<void>;
-  socialSignIn: (provider:'google'|'apple') => Promise<void>;
-  sendPhoneCode: (phoneNumber:string) => Promise<void>;
-  verifyPhoneCode: (phoneNumber:string,code:string) => Promise<void>;
+  /** Google or Apple. Rejects with `SignInCancelled` (`cancelled: true`) when the person closed the window. */
+  socialSignIn: (provider: Provider) => Promise<void>;
+  sendPhoneCode: (phoneNumber: string) => Promise<void>;
+  verifyPhoneCode: (phoneNumber: string, code: string) => Promise<void>;
 };
+
+type SavedAccount = { userId: string | null; ageConfirmed: boolean };
+
+async function readAccount(): Promise<SavedAccount | null> {
+  try {
+    const raw = await readSecret(ACCOUNT_KEY);
+    return raw ? (JSON.parse(raw) as SavedAccount) : null;
+  } catch {
+    return null;
+  }
+}
 
 const SessionContext = createContext<Session | null>(null);
 
@@ -37,81 +56,145 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<Status>("loading");
   const [userId, setUserId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const statusRef = useRef<Status>("loading");
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  const remember = useCallback(async (account: SavedAccount) => {
+    await writeSecret(ACCOUNT_KEY, JSON.stringify(account));
+  }, []);
 
   const clearLocal = useCallback(async () => {
     const { unwireOfflineFlush } = await import("@/lib/offline-queue");
     unwireOfflineFlush();
     setAuthToken(null);
     setUserId(null);
-    await deleteSecret(TOKEN_KEY);
+    await Promise.all([deleteSecret(TOKEN_KEY), deleteSecret(ACCOUNT_KEY), clearPendingOAuth()]);
     queryClient.clear();
     setStatus("signedOut");
   }, [queryClient]);
 
-  // On launch: restore a saved token and check the server still accepts it.
+  /** Saves a new session token, loads the account and moves on to the age check or the app. */
+  const finishSignIn = useCallback(
+    async (token: string | null) => {
+      if (!token) throw new Error("The server did not return a session. Please try again.");
+      setAuthToken(token);
+      queryClient.clear();
+      let boot: Awaited<ReturnType<typeof api.bootstrap>>;
+      try {
+        boot = await api.bootstrap(); // creates the member profile on first sign-in
+      } catch (error) {
+        setAuthToken(null);
+        throw error;
+      }
+      if (!boot.profile) {
+        setAuthToken(null);
+        throw new Error("Your account couldn't be loaded. Please try again.");
+      }
+      await writeSecret(TOKEN_KEY, token);
+      const ageConfirmed = boot.profile.minAgeConfirmed === true;
+      await remember({ userId: boot.profile.userId ?? null, ageConfirmed });
+      setNotice(null);
+      setUserId(boot.profile.userId ?? null);
+      setStatus(ageConfirmed ? "signedIn" : "needsAge");
+    },
+    [queryClient, remember],
+  );
+
+  // On launch: restore a saved session, or finish a Google/Apple sign-in whose return link reopened the app.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const saved = await readSecret(TOKEN_KEY);
-      if (!saved) return void (!cancelled && setStatus("signedOut"));
+      if (!saved) {
+        // Android may have closed Kamino while the sign-in browser was open; the return link restarts it.
+        const resumed = await resumeOAuthFromLink(await Linking.getInitialURL().catch(() => null)).catch(
+          (error: unknown) => {
+            if (!cancelled) setNotice(error instanceof Error ? error.message : "Sign-in didn't finish.");
+            return null;
+          },
+        );
+        if (cancelled) return;
+        if (resumed) {
+          await finishSignIn(resumed).catch(() => {
+            if (!cancelled) setStatus("signedOut");
+          });
+          return;
+        }
+        setStatus("signedOut");
+        return;
+      }
       setAuthToken(saved);
       try {
         const boot = await api.bootstrap();
         if (cancelled) return;
-        if (!boot.profile) await clearLocal();
-        else {
-          setUserId(boot.profile.userId ?? null);
-          setStatus(boot.profile.minAgeConfirmed ? "signedIn" : "needsAge");
-        }
+        if (!boot.profile) return void (await clearLocal());
+        const ageConfirmed = boot.profile.minAgeConfirmed === true;
+        await remember({ userId: boot.profile.userId ?? null, ageConfirmed });
+        setUserId(boot.profile.userId ?? null);
+        setStatus(ageConfirmed ? "signedIn" : "needsAge");
       } catch (error) {
         if (cancelled) return;
-        // Offline at launch keeps the session; only a real "not signed in" answer logs out.
-        const unauthorized = (error as { status?: number }).status === 401;
-        if (unauthorized) await clearLocal();
-        else setStatus("signedIn");
+        if ((error as { status?: number }).status === 401) {
+          setNotice("Your session ended. Please sign in again.");
+          await clearLocal();
+          return;
+        }
+        // Offline at launch: keep the session, using what was known last time. Someone who never passed the
+        // 18+ check stays on it.
+        const account = await readAccount();
+        setUserId(account?.userId ?? null);
+        setStatus(account?.ageConfirmed ? "signedIn" : "needsAge");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [clearLocal]);
+  }, [clearLocal, finishSignIn, remember]);
 
-  // Any later 401 (token revoked, account deleted) drops the user back to the sign-in screen.
+  // Any later 401 (session expired or revoked, account deleted) drops the person back to the sign-in screen,
+  // with a note saying why.
   useEffect(() => {
-    setUnauthorizedHandler(() => void clearLocal());
+    setUnauthorizedHandler(() => {
+      if (statusRef.current === "signedIn" || statusRef.current === "needsAge")
+        setNotice("Your session ended. Please sign in again.");
+      void clearLocal();
+    });
     return () => setUnauthorizedHandler(null);
   }, [clearLocal]);
-
-  const finishSignIn = useCallback(
-    async (token: string | null) => {
-      if (!token) throw new Error("The server did not return a session. Please try again.");
-      setAuthToken(token);
-      await writeSecret(TOKEN_KEY, token);
-      queryClient.clear();
-      const boot = await api.bootstrap(); // creates the member profile on first sign-in
-      setUserId(boot.profile?.userId ?? null);
-      setStatus(boot.profile?.minAgeConfirmed === false ? "needsAge" : "signedIn");
-    },
-    [queryClient],
-  );
 
   const value = useMemo<Session>(
     () => ({
       status,
       userId,
+      notice,
+      clearNotice: () => setNotice(null),
       signIn: async (email, password) => {
         const { token, body } = await authRequest("sign-in/email", { email: email.trim(), password });
-        if (body.twoFactorRedirect) throw Object.assign(new Error('Enter your authenticator code to complete sign-in.'), { twoFactorRequired: true });
+        if (body.twoFactorRedirect)
+          throw Object.assign(new Error("Enter your authenticator code to complete sign-in."), { twoFactorRequired: true });
         await finishSignIn(token);
       },
       signUp: async (name, email, password, birthday) => {
-        const capabilities=await rpc<{captchaSiteKey:string|null}>('getSignInCapabilities');
-        let captchaToken='';
-        if(capabilities.captchaSiteKey){const result=await WebBrowser.openAuthSessionAsync(`${apiBaseUrl()}/captcha`,'kamino://captcha-complete');if(result.type!=='success')throw new Error('Complete the verification to create your account.');captchaToken=new URL(result.url).searchParams.get('token')??'';if(!captchaToken)throw new Error('Verification failed. Please try again.');}
-        const { token } = await authRequest("sign-up/email", { name: name.trim(), email: email.trim(), password },captchaToken?{'x-captcha-response':captchaToken}:{});
-        if (!token) throw new Error('Check your email for the confirmation link, then sign in to complete your account.');
+        const capabilities = await rpc<{ captchaSiteKey: string | null }>("getSignInCapabilities");
+        const captchaToken = capabilities.captchaSiteKey
+          ? await runCaptcha(`${apiBaseUrl()}/captcha`, CAPTCHA_RETURN_URL)
+          : "";
+        const { token } = await authRequest(
+          "sign-up/email",
+          { name: name.trim(), email: email.trim(), password },
+          captchaToken ? { "x-captcha-response": captchaToken } : {},
+        );
+        if (!token)
+          throw new Error("Check your email for the confirmation link, then sign in to finish creating your account.");
+        // The 18+ check runs before the account is used for anything.
         setAuthToken(token);
-        const answer = await api.confirmAge(birthday);
+        const answer = await api.confirmAge(birthday).catch((error: unknown) => {
+          setAuthToken(null);
+          throw error;
+        });
         if (!answer.ok) {
           await clearLocal(); // the server has already erased the account
           throw new Error(YOUNG_MESSAGE);
@@ -124,6 +207,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           await clearLocal();
           return false;
         }
+        await remember({ userId, ageConfirmed: true });
         queryClient.clear();
         setStatus("signedIn");
         return true;
@@ -131,27 +215,33 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       signOut: async () => {
         await unregisterPushDevice().catch(() => undefined);
         await authRequest("sign-out", {}).catch(() => undefined); // best effort: local sign-out must always work
+        setNotice(null);
         await clearLocal();
       },
       requestPasswordReset: async (email) => {
         await authRequest("request-password-reset", { email: email.trim(), redirectTo: "/reset-password" });
       },
       verifyTwoFactor: async (code, backup = false) => {
-        const { token } = await authRequest(backup ? 'two-factor/verify-backup-code' : 'two-factor/verify-totp', { code: code.trim() });
+        const { token } = await authRequest(backup ? "two-factor/verify-backup-code" : "two-factor/verify-totp", {
+          code: code.trim(),
+        });
         await finishSignIn(token);
       },
-      socialSignIn: async provider => {
-        const flow=await rpc<{flowId:string;verifier:string;url:string;returnUrl:string}>('beginMobileOAuth',provider);
-        const result=await WebBrowser.openAuthSessionAsync(flow.url,flow.returnUrl);
-        if(result.type!=='success')throw new Error('Sign-in was cancelled.');
-        const callback=new URL(result.url),callbackProof=callback.searchParams.get('proof');
-        if(callback.searchParams.get('flow')!==flow.flowId||!callbackProof)throw new Error('The sign-in response could not be verified.');
-        const exchanged=await rpc<{token:string}>('finishMobileOAuth',{flowId:flow.flowId,verifier:flow.verifier,callbackProof});await finishSignIn(exchanged.token);
+      socialSignIn: async (provider) => {
+        setNotice(null);
+        await finishSignIn(await signInWithProvider(provider));
       },
-      sendPhoneCode: async phoneNumber => {await authRequest('phone-number/send-otp',{phoneNumber:phoneNumber.trim()});},
-      verifyPhoneCode: async(phoneNumber,code)=>{const response=await authRequest('phone-number/verify',{phoneNumber:phoneNumber.trim(),code:code.trim()});if(response.body.twoFactorRedirect)throw Object.assign(new Error('Enter your authenticator code to complete sign-in.'),{twoFactorRequired:true});await finishSignIn(response.token??(typeof response.body.token==='string'?response.body.token:null));},
+      sendPhoneCode: async (phoneNumber) => {
+        await authRequest("phone-number/send-otp", { phoneNumber: phoneNumber.trim() });
+      },
+      verifyPhoneCode: async (phoneNumber, code) => {
+        const response = await authRequest("phone-number/verify", { phoneNumber: phoneNumber.trim(), code: code.trim() });
+        if (response.body.twoFactorRedirect)
+          throw Object.assign(new Error("Enter your authenticator code to complete sign-in."), { twoFactorRequired: true });
+        await finishSignIn(response.token ?? (typeof response.body.token === "string" ? response.body.token : null));
+      },
     }),
-    [status, userId, finishSignIn, clearLocal, queryClient],
+    [status, userId, notice, finishSignIn, clearLocal, queryClient, remember],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
@@ -166,4 +256,9 @@ export function useSession(): Session {
 /** The raw session token, for surfaces that need to hand the sign-in to a WebView (watch party). */
 export async function readSessionToken(): Promise<string | null> {
   return readSecret(TOKEN_KEY);
+}
+
+/** True for an error that only means the person closed the sign-in window (show nothing for it). */
+export function isCancelledSignIn(error: unknown): boolean {
+  return Boolean((error as { cancelled?: boolean } | null)?.cancelled);
 }

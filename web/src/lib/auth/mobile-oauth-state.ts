@@ -20,3 +20,29 @@ export async function claimOAuthFlow(sql: Sql, id: string, verifier: string, cal
   if (!rows.length) throw new Error('The sign-in request expired or was already used. Please try again.');
   return String(rows[0]!.session_id);
 }
+
+/** How long a phone sign-in may take, from opening the browser to coming back. */
+export const OAUTH_FLOW_MINUTES = 10;
+
+/** Where the browser is sent back to in the app. */
+export const APP_RETURN_URL = 'kamino://auth-complete';
+
+/**
+ * The app link the browser returns to: `?flow=…&proof=…` on success, `?flow=…&error=<code>` otherwise. Errors go
+ * back to the app as well, so the person sees a message there instead of being stuck on a server page.
+ */
+export function appReturnLocation(flowId: string, outcome: { proof: string } | { error: string }): string {
+  const params = new URLSearchParams({ flow: flowId });
+  if ('proof' in outcome) params.set('proof', outcome.proof);
+  else params.set('error', outcome.error.replace(/[^a-z0-9_'-]/gi, '_').slice(0, 60) || 'unknown');
+  return `${APP_RETURN_URL}?${params.toString()}`;
+}
+
+/**
+ * A browser session only counts for a phone sign-in if it was created during this sign-in. An older session left in
+ * the browser (for example the website, signed in as someone else) must never be handed to the app.
+ */
+export function isFreshSession(createdAt: Date | string, now = new Date()): boolean {
+  const created = new Date(createdAt).getTime();
+  return Number.isFinite(created) && now.getTime() - created <= OAUTH_FLOW_MINUTES * 60_000 && created <= now.getTime() + 60_000;
+}

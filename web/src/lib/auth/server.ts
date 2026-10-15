@@ -129,6 +129,8 @@ const trustedOrigins: string[] = explicitBaseURL
 if (env('APPLE_CLIENT_ID') && env('APPLE_CLIENT_SECRET')) trustedOrigins.push('https://appleid.apple.com');
 
 const databaseUrl = env("DATABASE_URL");
+/** The phone app's iOS bundle id (mobile/app.config.ts). Override with APPLE_APP_BUNDLE_IDENTIFIER. */
+const APPLE_BUNDLE_ID = "com.kelnovalabs.kamino";
 
 // Static broker OAuth endpoints (skip OIDC discovery on every sign-in / callback).
 // Discovery would cost an extra network hop to the broker before the popup can
@@ -188,10 +190,28 @@ export const auth = betterAuth({
     const sql=await getSql();const status=(await sql`select status,until from identity_account_status where user_id=${session.userId}`)[0];
     if(status?.status==='banned'||(status?.status==='suspended'&&(!status.until||new Date(String(status.until)).getTime()>Date.now())))throw new APIError('FORBIDDEN',{message:'This account is suspended or banned. Contact Kamino support.'});
     return {data:session};
+  }}},
+  // See ./link-guard: a Google/Apple login is never attached to an unconfirmed password account.
+  account:{create:{before:async(account)=>{
+    const { blocksSocialLink } = await import('./link-guard');
+    const sql=await getSql();
+    const owner=(await sql`select u."emailVerified" as verified,
+      exists(select 1 from "account" a where a."userId"=u.id and a."providerId"='credential') as has_password
+      from "user" u where u.id=${account.userId}`)[0];
+    if(owner&&blocksSocialLink({providerId:account.providerId,emailVerified:owner.verified===true,hasPassword:owner.has_password===true}))
+      throw new APIError('FORBIDDEN',{message:'Sign in with your email and password first, then connect this login in Settings.'});
+    return {data:account};
   }}}},
   socialProviders: {
-    ...(env('GOOGLE_CLIENT_ID') && env('GOOGLE_CLIENT_SECRET') ? {google:{clientId:env('GOOGLE_CLIENT_ID')!,clientSecret:env('GOOGLE_CLIENT_SECRET')!}} : {}),
-    ...(env('APPLE_CLIENT_ID') && env('APPLE_CLIENT_SECRET') ? {apple:{clientId:env('APPLE_CLIENT_ID')!,clientSecret:env('APPLE_CLIENT_SECRET')!,appBundleIdentifier:env('APPLE_APP_BUNDLE_IDENTIFIER')}} : {}),
+    // prompt=select_account: Google always asks which account, so a shared phone never signs in the wrong person.
+    ...(env('GOOGLE_CLIENT_ID') && env('GOOGLE_CLIENT_SECRET') ? {google:{clientId:env('GOOGLE_CLIENT_ID')!,clientSecret:env('GOOGLE_CLIENT_SECRET')!,prompt:'select_account' as const}} : {}),
+    // Apple: the web flow uses the Services ID (APPLE_CLIENT_ID); the iPhone's own Sign in with Apple sheet issues
+    // tokens for the app's bundle id. Both are accepted.
+    ...(env('APPLE_CLIENT_ID') && env('APPLE_CLIENT_SECRET') ? {apple:{
+      clientId:env('APPLE_CLIENT_ID')!,clientSecret:env('APPLE_CLIENT_SECRET')!,
+      appBundleIdentifier:env('APPLE_APP_BUNDLE_IDENTIFIER') ?? APPLE_BUNDLE_ID,
+      audience:[env('APPLE_APP_BUNDLE_IDENTIFIER') ?? APPLE_BUNDLE_ID, env('APPLE_CLIENT_ID')!],
+    }} : {}),
   },
 
   // CSRF / origin check for credentialed auth POSTs (email sign-up/sign-in, …).
@@ -223,7 +243,9 @@ export const auth = betterAuth({
   // (incl. the client's `/get-session`) skip the DB — this shrinks the "loading"
   // window and reduces auth flicker. See the `auth` skill for the full
   // flicker-prevention guidance (gate on `isPending`; SSR the session).
-  session: { cookieCache: { enabled: false } },
+  // Sessions last 30 days and are extended (at most once a day) whenever the account is used, so people who
+  // open the app regularly stay signed in. The phone's token stays the same; only its expiry moves.
+  session: { cookieCache: { enabled: false }, expiresIn: 60 * 60 * 24 * 30, updateAge: 60 * 60 * 24 },
 
   // Local email/password — toggled only via `./email-password` (not a plugin).
   ...(emailAndPasswordEnabled

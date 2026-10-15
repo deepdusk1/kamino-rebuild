@@ -10,7 +10,7 @@ import { GradientWord, VIOLET_GRADIENT } from "@/components/home/Decor";
 import { StepHeader } from "@/components/home/StepHeader";
 import { FilterPills, GradientButton } from "@/components/k";
 import { Appear, Button, Field, Screen, Sheet, Txt } from "@/components/ui";
-import { useSession } from "@/auth/session";
+import { isCancelledSignIn, useSession } from "@/auth/session";
 import { errorMessage } from "@/lib/errors";
 import { font, radius, shadow, space, useTheme } from "@/theme";
 
@@ -23,7 +23,7 @@ const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default function SignIn() {
   const theme = useTheme();
   const params = useLocalSearchParams<{ mode?: string }>();
-  const { signIn, signUp, requestPasswordReset, verifyTwoFactor,socialSignIn,sendPhoneCode,verifyPhoneCode } = useSession();
+  const { signIn, signUp, requestPasswordReset, verifyTwoFactor, socialSignIn, sendPhoneCode, verifyPhoneCode, notice, clearNotice } = useSession();
 
   const [mode, setMode] = useState<"in" | "up">(params.mode === "up" ? "up" : "in");
   const [name, setName] = useState("");
@@ -31,6 +31,7 @@ export default function SignIn() {
   const [password, setPassword] = useState("");
   const [birthday, setBirthday] = useState(EMPTY_BIRTHDAY);
   const [busy, setBusy] = useState(false);
+  const [oauthBusy, setOauthBusy] = useState<"google" | "apple" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [twoFactor, setTwoFactor] = useState(false);
   const [authCode, setAuthCode] = useState('');
@@ -99,6 +100,22 @@ export default function SignIn() {
     setError(null);
   };
   const openWeb = (path: string) => void WebBrowser.openBrowserAsync(`${apiBaseUrl()}${path}`);
+
+  /** Google / Apple. Closing the sign-in window shows nothing; anything else shows why. */
+  async function social(provider: "google" | "apple") {
+    if (busy || oauthBusy) return;
+    setOauthBusy(provider);
+    setError(null);
+    clearNotice();
+    try {
+      await socialSignIn(provider);
+      // On success the root layout moves on to the 18+ check (new accounts) or the app by itself.
+    } catch (e) {
+      if (!isCancelledSignIn(e)) setError(errorMessage(e));
+    } finally {
+      setOauthBusy(null);
+    }
+  }
   const up = mode === "up";
 
   return (
@@ -137,9 +154,23 @@ export default function SignIn() {
           ) : null}
           {up ? <BirthdayFields value={birthday} onChange={setBirthday} /> : null}
 
-          {error ? <Txt tone="danger" accessibilityLiveRegion="polite">{error}</Txt> : null}
-          <GradientButton label={twoFactor ? 'Verify code' : up ? "Create My Account" : "Sign In"} gradient="hero" size="lg" iconRight="arrow-forward" full busy={busy} onPress={() => void submit()} />
-          {(['google','apple'] as const).filter(provider=>capabilities.data?.[provider]).map(provider=><Button key={provider} variant="secondary" label={`Continue with ${provider==='apple'?'Apple':'Google'}`} busy={busy} onPress={async()=>{setBusy(true);setError(null);try{await socialSignIn(provider);}catch(e){setError(errorMessage(e));setBusy(false);}}}/>)}
+          {error ? <Txt tone="danger" accessibilityLiveRegion="polite">{error}</Txt> : notice ? <Txt tone="muted" accessibilityLiveRegion="polite">{notice}</Txt> : null}
+          <GradientButton label={twoFactor ? 'Verify code' : up ? "Create My Account" : "Sign In"} gradient="hero" size="lg" iconRight="arrow-forward" full busy={busy} disabled={oauthBusy !== null} onPress={() => void submit()} />
+          {/* Google/Apple accounts go through the 18+ birthday check right after their first sign-in. */}
+          {!twoFactor
+            ? (["apple", "google"] as const)
+                .filter((provider) => capabilities.data?.[provider])
+                .map((provider) => (
+                  <Button
+                    key={provider}
+                    variant="secondary"
+                    label={`Continue with ${provider === "apple" ? "Apple" : "Google"}`}
+                    busy={oauthBusy === provider}
+                    disabled={busy || (oauthBusy !== null && oauthBusy !== provider)}
+                    onPress={() => void social(provider)}
+                  />
+                ))
+            : null}
           {capabilities.data?.phone&&<View style={{gap:10}}><Field label="Phone number" value={phone} onChangeText={setPhone} keyboardType="phone-pad" placeholder="+16045551234"/>{phoneSent&&<Field label="SMS code" value={phoneCode} onChangeText={setPhoneCode} keyboardType="number-pad" maxLength={6}/>}<Button label={phoneSent?'Verify SMS code':'Send SMS code'} variant="secondary" busy={busy} onPress={async()=>{setBusy(true);setError(null);try{if(phoneSent)await verifyPhoneCode(phone,phoneCode);else{await sendPhoneCode(phone);setPhoneSent(true);}}catch(e){if((e as {twoFactorRequired?:boolean}).twoFactorRequired)setTwoFactor(true);setError(errorMessage(e));}finally{setBusy(false);}}}/></View>}
 
           <Txt variant="caption" tone="subtle" style={{ textAlign: "center" }}>

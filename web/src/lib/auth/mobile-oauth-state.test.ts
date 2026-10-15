@@ -54,3 +54,19 @@ test('browser callback cannot be rebound and simultaneous exchange has one winne
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
   assert.equal(results.filter(result => result.status === 'rejected').length, 1);
 });
+
+test('the browser goes back to the app with a proof, or with an error code instead of a server page', async () => {
+  const { appReturnLocation } = await import('./mobile-oauth-state.ts');
+  assert.equal(appReturnLocation('flow1', { proof: 'p' }), 'kamino://auth-complete?flow=flow1&proof=p');
+  assert.equal(appReturnLocation('flow1', { error: 'access_denied' }), 'kamino://auth-complete?flow=flow1&error=access_denied');
+  // Whatever a provider puts in its error, only a short, safe code reaches the app link.
+  assert.equal(appReturnLocation('f', { error: 'bad"><script>' }), 'kamino://auth-complete?flow=f&error=bad___script_');
+});
+
+test('only a session created during this sign-in is handed to the phone', async () => {
+  const { isFreshSession } = await import('./mobile-oauth-state.ts');
+  const now = new Date('2026-10-15T08:00:00Z');
+  assert.equal(isFreshSession(new Date('2026-10-15T07:58:00Z'), now), true);
+  assert.equal(isFreshSession(new Date('2026-10-15T07:40:00Z'), now), false, 'an old session left in the browser');
+  assert.equal(isFreshSession('not a date', now), false);
+});

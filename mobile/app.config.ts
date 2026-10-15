@@ -32,6 +32,8 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: IDENTIFIER,
     supportsTablet: true,
+    // The iPhone's own "Sign in with Apple" sheet (also needs the capability on the App ID; EAS turns it on).
+    usesAppleSignIn: true,
     buildNumber: "1",
     infoPlist: {
       // Shown to people the first time the app asks. Apple rejects vague or missing text.
@@ -61,6 +63,7 @@ const config: ExpoConfig = {
     ['expo-contacts', { contactsPermission: 'Kamino reads contact email addresses only when you choose to preview them. You select which addresses to match; contact names stay on your device.' }],
     'expo-sharing',
     "expo-router",
+    "expo-apple-authentication",
     "expo-secure-store",
     "expo-font",
     ["expo-splash-screen", { image: "./assets/splash-icon.png", imageWidth: 160, backgroundColor: "#f8f7ff", dark: { backgroundColor: "#15112a" } }],
