@@ -584,11 +584,18 @@ async function notify(
   // Phones get a push as well. Failures are swallowed inside: a broken push
   // service must never make a like, comment or message fail.
   const { sendPush } = await loadPush();
-  await sendPush(sql, userId, { title, body, href, notificationId:Number(notificationRows[0].id) });
+  const notificationId = Number(notificationRows[0].id);
+  await sendPush(sql, userId, { title, body, href, notificationId });
+  // A call has to ring now, not at the next once-a-minute push run. Not awaited: the caller shouldn't wait on Expo.
+  if (kind === "call")
+    void loadPushJobs()
+      .then(({ deliverPushNow }) => deliverPushNow(sql, notificationId))
+      .catch(() => undefined);
 }
 
 /** Loads the push sender on the server only (the website's browser bundle never includes it). */
 const loadPush = createServerOnlyFn(() => import("./push.server"));
+const loadPushJobs = createServerOnlyFn(() => import("./jobs.server"));
 
 /**
  * When each person's event reminders were last looked at (so busy screens do not query every time). Kept on

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import type { Sql } from "../db.ts";
 import {
@@ -17,6 +17,9 @@ import {
   processPushDeliveries,
   processEmailDigests,
   enqueueWeeklyDigest,
+  buildExpoPushMessage,
+  CALL_RING_SECONDS,
+  PUSH_CHANNEL_IDS,
 } from "./delivery-v10.server.ts";
 import { sendPush } from "./push.server.ts";
 
@@ -108,6 +111,11 @@ test("push tickets remain pending provider confirmation, payload hides names and
   assert.equal(first.delivered, 0);
   assert.ok(!sentBody.includes("OTHER_PRIVATE"));
   assert.match(sentBody, /Open Kamino/);
+  // Android: the loud messages channel and high priority, so the push wakes a closed app and makes a sound.
+  const [sent] = JSON.parse(sentBody) as { channelId: string; priority: string; title: string }[];
+  assert.equal(sent!.channelId, PUSH_CHANNEL_IDS.messages);
+  assert.equal(sent!.priority, "high");
+  assert.equal(sent!.title, "New message");
   assert.equal((await sql`select status from push_delivery_queue`)[0].status, "receipt");
   const second = await processPushDeliveries(sql, {
     now: new Date(now.getTime() + 16 * 60000),
@@ -634,4 +642,97 @@ test("an audit failure rolls back a case sanction, session removal and case deci
     await sql.query("drop function reject_operations_audit()");
     await sql.query("drop table operations_test_rejected_actor");
   }
+});
+
+test("each push style gets the app's channel, actions and lifetime, and never the sender's name or text", () => {
+  const call = buildExpoPushMessage("ExpoPushToken[a]", { id: 7, kind: "call", href: "/chats/12?call=1" });
+  assert.equal(call.channelId, PUSH_CHANNEL_IDS.calls);
+  assert.equal(call.categoryId, "KAMINO_INCOMING_CALL");
+  assert.equal(call.ttl, CALL_RING_SECONDS);
+  assert.equal(call.priority, "high");
+  assert.deepEqual(call.data, { href: "/chats/12?call=1", kind: "call", roomId: 12, notificationId: 7 });
+
+  const chat = buildExpoPushMessage("ExpoPushToken[a]", { id: 8, kind: "chat", href: "/chats/12" });
+  assert.equal(chat.channelId, PUSH_CHANNEL_IDS.messages);
+  assert.equal(chat.categoryId, "KAMINO_CHAT_MESSAGE");
+  assert.equal(chat.ttl, 86400);
+
+  const live = buildExpoPushMessage("ExpoPushToken[a]", { id: 9, kind: "live", href: "/live/3" });
+  assert.equal(live.channelId, PUSH_CHANNEL_IDS.events);
+  assert.equal(live.data.roomId, 3);
+
+  const like = buildExpoPushMessage("ExpoPushToken[a]", { id: 10, kind: "like", href: "/c/books/p/4" });
+  assert.equal(like.channelId, PUSH_CHANNEL_IDS.general);
+  assert.equal("categoryId" in like, false);
+  assert.equal(like.data.kind, "like");
+
+  // An unsafe link falls back to the notifications list.
+  assert.equal(buildExpoPushMessage("t", { id: 1, kind: "like", href: "https://evil.example" }).data.href, "/notifications");
+});
+
+test("the server's channel ids are the ones the phone app creates (a mismatch hides the push)", () => {
+  const app = new URL("../../../../mobile/src/lib/push.ts", import.meta.url);
+  if (!existsSync(app)) return; // the web app can be checked out on its own
+  const source = readFileSync(app, "utf8");
+  for (const id of Object.values(PUSH_CHANNEL_IDS)) assert.ok(source.includes(`"${id}"`), `${id} missing in the app`);
+});
+
+async function callFixture(createdSecondsAgo: number) {
+  const userId = await person(),
+    token = `ExpoPushToken[call-${sequence}]`;
+  await sql`insert into push_tokens(token,user_id) values(${token},${userId})`;
+  const rows = await sql<{ id: number }>`
+    insert into notifications(user_id,kind,title,body,href,created_at)
+    values(${userId},'call','CALLER_NAME','Incoming call','/chats/5?call=1',now()-${createdSecondsAgo}*interval '1 second') returning id`;
+  const notificationId = Number(rows[0]!.id);
+  await sendPush(sql, userId, { title: "CALLER_NAME", body: "Incoming call", href: "/chats/5?call=1", notificationId });
+  return notificationId;
+}
+
+test("a call rings once with a short lifetime; late or quiet-hours calls are dropped, not delayed", async () => {
+  await clearQueues();
+  let sentBody = "";
+  const provider = request(async (_url, init) => {
+    sentBody = String(init.body);
+    return reply([{ status: "ok", id: "ticket-call" }]);
+  });
+  await callFixture(1);
+  const fresh = await processPushDeliveries(sql, { allowed: allow, request: provider });
+  assert.equal(fresh.sent, 1);
+  assert.ok(!sentBody.includes("CALLER_NAME"));
+  assert.match(sentBody, /"ttl":45/);
+
+  await clearQueues();
+  sentBody = "";
+  await callFixture(CALL_RING_SECONDS + 30);
+  const late = await processPushDeliveries(sql, { allowed: allow, request: provider });
+  assert.equal(late.cancelled, 1);
+  assert.equal(sentBody, "");
+
+  await clearQueues();
+  await callFixture(1);
+  const quiet = await processPushDeliveries(sql, { allowed: async () => "quiet", request: provider });
+  assert.equal(quiet.cancelled, 1);
+  assert.equal(quiet.deferred, 0);
+  assert.equal(sentBody, "");
+});
+
+test("immediate delivery for one notification leaves everyone else's queued pushes to the scheduler", async () => {
+  await clearQueues();
+  await pushFixture();
+  const callId = await callFixture(1);
+  const result = await processPushDeliveries(sql, {
+    notificationId: callId,
+    allowed: allow,
+    request: request(async () => reply([{ status: "ok", id: "ticket-now" }])),
+  });
+  assert.equal(result.sent, 1);
+  const statuses = await sql<{ notification_id: number; status: string }>`select notification_id,status from push_delivery_queue order by id`;
+  assert.deepEqual(
+    statuses.map((r) => [Number(r.notification_id) === callId, r.status]),
+    [
+      [false, "pending"],
+      [true, "receipt"],
+    ],
+  );
 });

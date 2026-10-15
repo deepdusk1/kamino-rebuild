@@ -95,6 +95,16 @@ You do **not** need a Mac or Android Studio: Expo builds the apps in the cloud.
    ```
    `init` prints a **project ID**. Paste it into `app.config.ts` on the line
    `const EAS_PROJECT_ID = "";`. (This is what switches push notifications on.)
+
+   **Android push also needs Firebase** (Expo delivers Android pushes through Firebase Cloud Messaging):
+   - In the [Firebase console](https://console.firebase.google.com), add an Android app with the package
+     name `com.kelnovalabs.kamino`, download `google-services.json` and put it in this folder (it is safe
+     to commit). `app.config.ts` picks it up automatically.
+   - Firebase > Project settings > Service accounts > **Generate new private key**. Upload that key with
+     `npx eas-cli credentials` (Android > production > Google Service Account > FCM V1). Never commit it.
+   - On the server set `KAMINO_PUSH_ENABLED=true` (and `EXPO_ACCESS_TOKEN` if you turned on Expo's
+     enhanced push security).
+   - Make a new build after adding the file: push settings are baked into the app, an update over the air is not enough.
 2. Point the app at your **public server address** (https): `npm run set-server https://your-server.example you@your-email.example`.
    This updates `eas.json` and `.env` for you. Phones cannot use `localhost`; a real build must point
    at a server on the internet (the root `DEPLOY.md` shows how to host one).

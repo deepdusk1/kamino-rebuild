@@ -2,13 +2,14 @@
 import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
+import * as TaskManager from "expo-task-manager";
 import { Platform } from "react-native";
 import { rpc, setAuthToken } from "@/api/client";
 import { api } from "@/api/endpoints";
 import { deleteSecret, readSecret, writeSecret } from "@/auth/storage";
 
 const PUSH_TOKEN_KEY = "kamino.push-token";
-const DEVICE_FCM_TOKEN_KEY = "kamino.fcm-token";
+const LEGACY_DEVICE_TOKEN_KEY = "kamino.fcm-token";
 const SESSION_TOKEN_KEY = "kamino.session-token";
 const BACKGROUND_PUSH_TASK = "KAMINO_BACKGROUND_PUSH_TASK";
 
@@ -26,7 +27,8 @@ export const PUSH_CHANNELS = {
   CALLS: "kamino_calls_critical_v2",
   EVENTS: "kamino_events_high_v2",
   LIVE: "kamino_events_high_v2",
-  DEFAULT: "default",
+  /** Not "default": Android keeps the first importance a channel id was created with, and older installs have a quiet "default". */
+  DEFAULT: "kamino_general_v2",
 } as const;
 
 export type PushChannelId = (typeof PUSH_CHANNELS)[keyof typeof PUSH_CHANNELS];
@@ -54,37 +56,6 @@ export type ParsedPushTarget = {
   isChatMessage: boolean;
   channelId: PushChannelId;
   categoryIdentifier: PushCategoryId | undefined;
-};
-
-type TaskManagerBody = {
-  data?: unknown;
-  error?: { message?: string } | null;
-};
-
-type TaskManagerModule = {
-  isTaskDefined: (taskName: string) => boolean;
-  defineTask: (taskName: string, executor: (body: TaskManagerBody) => Promise<void>) => void;
-};
-
-type FirebaseRemoteMessage = {
-  messageId?: string;
-  notification?: {
-    title?: string;
-    body?: string;
-  };
-  data?: Record<string, string>;
-};
-
-type FirebaseMessagingInstance = {
-  getToken?: () => Promise<string>;
-  onTokenRefresh?: (listener: (token: string) => void) => () => void;
-  setBackgroundMessageHandler?: (
-    handler: (message: FirebaseRemoteMessage) => Promise<void>,
-  ) => void;
-};
-
-type FirebaseMessagingModule = {
-  default?: () => FirebaseMessagingInstance;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -442,93 +413,37 @@ export async function presentDataPayloadNotification(
 }
 
 /**
- * Registers headless background / killed-state push handlers for both:
- * 1. `expo-task-manager` + `Notifications.registerTaskAsync`
- * 2. `@react-native-firebase/messaging` `setBackgroundMessageHandler` (when linked in native builds)
+ * Background push handling (app in the background or killed): runs for data-only pushes. Pushes that carry a
+ * title are shown by the system itself on the right channel, so here we only (a) show data-only pushes and
+ * (b) take down a ringing call when a "call ended" push arrives. A visible push is never shown twice.
  */
 function registerHeadlessBackgroundHandlers(): void {
   if (Platform.OS === "web") return;
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const TaskManager = require("expo-task-manager") as TaskManagerModule;
-    if (!TaskManager.isTaskDefined(BACKGROUND_PUSH_TASK)) {
-      TaskManager.defineTask(BACKGROUND_PUSH_TASK, async ({ data, error }) => {
-        if (error || !data || !isRecord(data)) return;
-        try {
-          const notificationObj = isRecord(data.notification)
-            ? data.notification
-            : null;
-          const requestObj =
-            notificationObj && isRecord(notificationObj.request)
-              ? notificationObj.request
-              : null;
-          const contentObj =
-            requestObj && isRecord(requestObj.content)
-              ? requestObj.content
-              : null;
-
-          const hasSystemAlert = Boolean(
-            contentObj && toNonEmptyString(contentObj.title),
-          );
-          const payloadData = isRecord(data.data)
-            ? data.data
-            : contentObj && isRecord(contentObj.data)
-              ? contentObj.data
-              : data;
-
-          const target = extractNotificationTarget(payloadData);
-
-          if (target.isCallEnded) {
-            await dismissIncomingCallNotification(target.roomId, target.callId);
-            return;
-          }
-
-          // If the OS did not already display a notification alert (or if it is an incoming call
-          // requiring full-screen high-priority ringing), schedule the local heads-up notification.
-          if (!hasSystemAlert || target.isCall) {
-            await presentDataPayloadNotification(payloadData);
-          }
-        } catch {
-          // Never throw inside headless background task
-        }
-      });
-    }
-    void Notifications.registerTaskAsync(BACKGROUND_PUSH_TASK).catch(
-      () => undefined,
-    );
-  } catch {
-    // expo-task-manager not linked in web/preview builds
-  }
-
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const messagingMod = require("@react-native-firebase/messaging") as FirebaseMessagingModule;
-    const messaging = messagingMod.default ? messagingMod.default() : null;
-    if (messaging?.setBackgroundMessageHandler) {
-      messaging.setBackgroundMessageHandler(async (remoteMessage) => {
-        const rawData: Record<string, unknown> = {
-          ...(remoteMessage.data ?? {}),
-          ...(remoteMessage.notification?.title
-            ? { title: remoteMessage.notification.title }
-            : {}),
-          ...(remoteMessage.notification?.body
-            ? { body: remoteMessage.notification.body }
-            : {}),
-        };
-        const target = extractNotificationTarget(rawData);
+  if (!TaskManager.isTaskDefined(BACKGROUND_PUSH_TASK)) {
+    TaskManager.defineTask<Record<string, unknown>>(BACKGROUND_PUSH_TASK, async ({ data, error }) => {
+      if (error || !data || !isRecord(data)) return;
+      try {
+        const notificationObj = isRecord(data.notification) ? data.notification : null;
+        const requestObj = notificationObj && isRecord(notificationObj.request) ? notificationObj.request : null;
+        const contentObj = requestObj && isRecord(requestObj.content) ? requestObj.content : null;
+        const hasSystemAlert = Boolean(contentObj && toNonEmptyString(contentObj.title));
+        const payloadData = isRecord(data.data)
+          ? data.data
+          : contentObj && isRecord(contentObj.data)
+            ? contentObj.data
+            : data;
+        const target = extractNotificationTarget(payloadData);
         if (target.isCallEnded) {
           await dismissIncomingCallNotification(target.roomId, target.callId);
           return;
         }
-        if (!remoteMessage.notification?.title || target.isCall) {
-          await presentDataPayloadNotification(rawData);
-        }
-      });
-    }
-  } catch {
-    // @react-native-firebase/messaging not installed; Expo's native FCM receiver handles delivery
+        if (!hasSystemAlert) await presentDataPayloadNotification(payloadData);
+      } catch {
+        // Never throw inside a background task.
+      }
+    });
   }
+  void Notifications.registerTaskAsync(BACKGROUND_PUSH_TASK).catch(() => undefined);
 }
 
 registerHeadlessBackgroundHandlers();
@@ -560,7 +475,7 @@ export async function setupChannelsAndCategories(): Promise<void> {
 
     await Notifications.setNotificationChannelAsync(PUSH_CHANNELS.CALLS, {
       name: "Incoming Calls",
-      description: "Full-screen 1:1 and group voice & video call alerts",
+      description: "Ringing alerts for incoming voice and video calls",
       importance: Notifications.AndroidImportance.MAX,
       enableVibrate: true,
       vibrationPattern: [0, 800, 400, 800, 400, 800, 400, 800],
@@ -671,13 +586,25 @@ export function configureForegroundNotifications(): void {
 }
 
 let tokenRefreshSubscription: Notifications.EventSubscription | null = null;
-let firebaseTokenRefreshUnsubscribe: (() => void) | null = null;
+
+/** Gets this phone's Expo push token and saves it on the server. False when there is no EAS project or no token. */
+async function registerExpoToken(platform: PushPlatform): Promise<boolean> {
+  const easExtra = Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined;
+  const projectId = easExtra?.eas?.projectId ?? Constants.easConfig?.projectId ?? null;
+  if (!projectId) return false;
+  try {
+    const expoPush = await Notifications.getExpoPushTokenAsync({ projectId });
+    if (typeof expoPush?.data !== "string" || !expoPush.data) return false;
+    return await registerTokenViaRpc(expoPush.data, platform, PUSH_TOKEN_KEY);
+  } catch {
+    // Usually a missing google-services.json (Android) or no network; push stays off until the next launch.
+    return false;
+  }
+}
 
 /**
- * Requests notification permissions (including Android 13+ `POST_NOTIFICATIONS`),
- * sets up high-importance channels, registers BOTH the native FCM/APNs token and the Expo push token
- * via the `registerPushToken` RPC, and attaches live token-refresh listeners so rotated tokens
- * are automatically re-registered with the backend.
+ * Asks for notification permission (Android 13+ `POST_NOTIFICATIONS` too), creates the Android channels, saves the
+ * Expo push token on the server, and re-saves it whenever the phone's token rotates.
  */
 export async function registerPushDevice(): Promise<PushRegistrationStatus> {
   try {
@@ -703,86 +630,14 @@ export async function registerPushDevice(): Promise<PushRegistrationStatus> {
     }
 
     const platform: PushPlatform = Platform.OS === "ios" ? "ios" : "android";
-    let registeredAny = false;
+    // Kamino sends through Expo's push service, which delivers over FCM (Android) and APNs (iOS). Only the
+    // Expo token is registered: registering the raw FCM/APNs token too would make every alert arrive twice.
+    const registeredAny = await registerExpoToken(platform);
 
-    // 1. Register native FCM (Android) / APNs (iOS) token via Expo Notifications
-    try {
-      const nativeToken = await Notifications.getDevicePushTokenAsync();
-      if (nativeToken && typeof nativeToken.data === "string" && nativeToken.data.trim()) {
-        const ok = await registerTokenViaRpc(
-          nativeToken.data,
-          platform,
-          DEVICE_FCM_TOKEN_KEY,
-        );
-        if (ok) registeredAny = true;
-      }
-    } catch {
-      // Continue to Firebase / Expo token fallback if native device token is unavailable in dev client
-    }
-
-    // 2. Register native FCM token via @react-native-firebase/messaging if linked
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const messagingMod = require("@react-native-firebase/messaging") as FirebaseMessagingModule;
-      const messaging = messagingMod.default ? messagingMod.default() : null;
-      if (messaging?.getToken) {
-        const fcmToken = await messaging.getToken();
-        if (typeof fcmToken === "string" && fcmToken.trim()) {
-          const ok = await registerTokenViaRpc(
-            fcmToken,
-            platform,
-            DEVICE_FCM_TOKEN_KEY,
-          );
-          if (ok) registeredAny = true;
-        }
-      }
-      if (messaging?.onTokenRefresh && !firebaseTokenRefreshUnsubscribe) {
-        firebaseTokenRefreshUnsubscribe = messaging.onTokenRefresh((rotatedToken: string) => {
-          if (typeof rotatedToken === "string" && rotatedToken.trim()) {
-            void registerTokenViaRpc(
-              rotatedToken,
-              platform,
-              DEVICE_FCM_TOKEN_KEY,
-            ).catch(() => undefined);
-          }
-        });
-      }
-    } catch {
-      // @react-native-firebase/messaging not linked; Expo's native FCM token listener is used below
-    }
-
-    // 3. Register Expo Push Token (`ExponentPushToken[...]`) when EAS projectId is configured
-    const easExtra = Constants.expoConfig?.extra as
-      | { eas?: { projectId?: string } }
-      | undefined;
-    const projectId =
-      easExtra?.eas?.projectId ?? Constants.easConfig?.projectId ?? null;
-
-    if (projectId) {
-      try {
-        const expoPush = await Notifications.getExpoPushTokenAsync({ projectId });
-        if (expoPush?.data && typeof expoPush.data === "string") {
-          const ok = await registerTokenViaRpc(
-            expoPush.data,
-            platform,
-            PUSH_TOKEN_KEY,
-          );
-          if (ok) registeredAny = true;
-        }
-      } catch {
-        // Native FCM token is still active even if Expo push service is unreachable
-      }
-    }
-
-    // 4. Attach automatic token-refresh listener so rotated FCM/APNs tokens re-register immediately
+    // When the phone's FCM/APNs token rotates, ask Expo again so the server always has a working token.
     if (!tokenRefreshSubscription) {
-      tokenRefreshSubscription = Notifications.addPushTokenListener((event) => {
-        const rotated =
-          typeof event.data === "string" ? event.data.trim() : "";
-        if (!rotated) return;
-        void registerTokenViaRpc(rotated, platform, DEVICE_FCM_TOKEN_KEY).catch(
-          () => undefined,
-        );
+      tokenRefreshSubscription = Notifications.addPushTokenListener(() => {
+        void registerExpoToken(platform).catch(() => undefined);
       });
     }
 
@@ -900,31 +755,24 @@ export async function handleNotificationResponseAction(
 }
 
 /**
- * Unregisters both the Expo push token and native FCM/APNs device token via the
- * `unregisterPushToken` RPC on sign-out, clears stored token secrets, and detaches listeners.
+ * On sign-out: removes this phone's push token from the server, clears the saved token, and stops listening for
+ * token changes.
  */
 export async function unregisterPushDevice(): Promise<void> {
   tokenRefreshSubscription?.remove();
   tokenRefreshSubscription = null;
-
-  if (firebaseTokenRefreshUnsubscribe) {
-    firebaseTokenRefreshUnsubscribe();
-    firebaseTokenRefreshUnsubscribe = null;
-  }
 
   for (const [id] of activeCallRingLoops) {
     stopCallRingLoop(id);
   }
 
   const expoToken = await readSecret(PUSH_TOKEN_KEY);
-  const fcmToken = await readSecret(DEVICE_FCM_TOKEN_KEY);
+  // Builds before this change also saved the raw device token; clear it if it is still there.
+  const legacyDeviceToken = await readSecret(LEGACY_DEVICE_TOKEN_KEY);
 
   if (expoToken) {
     await unregisterTokenViaRpc(expoToken).catch(() => undefined);
     await deleteSecret(PUSH_TOKEN_KEY);
   }
-  if (fcmToken && fcmToken !== expoToken) {
-    await unregisterTokenViaRpc(fcmToken).catch(() => undefined);
-    await deleteSecret(DEVICE_FCM_TOKEN_KEY);
-  }
+  if (legacyDeviceToken) await deleteSecret(LEGACY_DEVICE_TOKEN_KEY);
 }

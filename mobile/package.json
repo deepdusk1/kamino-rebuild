@@ -50,6 +50,7 @@
     "expo-sharing": "~57.0.22",
     "expo-splash-screen": "~57.0.9",
     "expo-status-bar": "~57.0.1",
+    "expo-task-manager": "~57.0.21",
     "expo-video": "~57.0.5",
     "expo-web-browser": "~57.0.3",
     "livekit-client": "^2.22.3",

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { ExpoConfig } from "expo/config";
 
 /**
@@ -10,6 +11,15 @@ import type { ExpoConfig } from "expo/config";
  */
 const IDENTIFIER = "com.kelnovalabs.kamino";
 const EAS_PROJECT_ID = "c7e6db5e-9724-406a-b6a0-b95b79842823"; // Linked 2026-09-29 to the kelnovalabs Expo account.
+
+/**
+ * Firebase's google-services.json, needed for push on Android (Expo delivers Android pushes through Firebase Cloud
+ * Messaging). Download it from the Firebase console (Project settings > Your apps > Android app with the package
+ * name below) and save it next to this file, or upload it as an EAS file secret named GOOGLE_SERVICES_JSON.
+ * Without it the app still builds, but Android phones get no push token.
+ */
+const GOOGLE_SERVICES_FILE =
+  process.env.GOOGLE_SERVICES_JSON ?? (existsSync("./google-services.json") ? "./google-services.json" : undefined);
 
 const config: ExpoConfig = {
   name: "Kamino",
@@ -34,6 +44,7 @@ const config: ExpoConfig = {
   android: {
     package: IDENTIFIER,
     versionCode: 1,
+    ...(GOOGLE_SERVICES_FILE ? { googleServicesFile: GOOGLE_SERVICES_FILE } : {}),
     adaptiveIcon: {
       foregroundImage: "./assets/adaptive-icon.png",
       backgroundColor: "#8c70ef",
