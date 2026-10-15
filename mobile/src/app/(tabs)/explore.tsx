@@ -31,7 +31,6 @@ import {
 } from "@/components/community/helpers";
 import { serverImage } from "@/components/community/media";
 import { YourCommunities } from "@/components/community/YourCommunities";
-import { notify } from "@/components/community/platform";
 import {
   AppHeader,
   EmptyHint,
@@ -55,6 +54,8 @@ import { defaultCover, heroArt, interestArt } from "@/lib/brandArt";
 import { errorMessage, showError } from "@/lib/errors";
 import { compactNumber } from "@/lib/format";
 import { haptic } from "@/lib/haptics";
+import { joinButtonLabel, tapJoinButton } from "@/lib/community-join";
+import { setFollow, wantsFollow } from "@/lib/follow";
 import { useDebounced } from "@/lib/useDebounced";
 import { font, joinColor, radius, shadow, useTheme, type Tone } from "@/theme";
 
@@ -150,11 +151,6 @@ const MONTHS_SHORT = [
   "NOV",
   "DEC",
 ] as const;
-
-type JoinCommunityRpcResult = {
-  pending?: boolean;
-  joined?: boolean;
-};
 
 type ListEventsRpcResult = {
   community?: {
@@ -382,31 +378,11 @@ export default function Explore() {
    * Joins or leaves a community, wired directly to `rpc("joinCommunity", { slug })`.
    */
   async function toggleJoin(c: CommunityCardData): Promise<void> {
-    if (!c.joined && c.visibility === "private") {
-      router.push(`/community/${c.id}`);
-      return;
-    }
     setBusyKey(`join:${c.id}`);
     try {
-      if (c.joined) {
-        await api.leave(c.id);
-        patchCommunityEverywhere(c.id, false);
-      } else {
-        const result = await rpc<JoinCommunityRpcResult>("joinCommunity", {
-          slug: c.id,
-        });
-        if (result.pending) {
-          notify(
-            "Request sent",
-            "The leaders will review your request. You'll get a notification when you're in.",
-          );
-        } else {
-          haptic.success();
-          patchCommunityEverywhere(c.id, true);
-        }
-      }
-      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-      void queryClient.invalidateQueries({ queryKey: ["exploreOverview"] });
+      // Leaving asks first; private, approval and invite-only communities open their page (join questions, invites).
+      const next = await tapJoinButton(queryClient, c);
+      if (next !== null) patchCommunityEverywhere(c.id, next);
     } catch (error) {
       showError(error);
     } finally {
@@ -417,39 +393,8 @@ export default function Explore() {
   async function toggleFollow(creator: CreatorCard): Promise<void> {
     setBusyKey(`follow:${creator.userId}`);
     try {
-      const result = await api.followProfile(creator.userId);
-      queryClient.setQueriesData<HomeOverview>(
-        { queryKey: ["homeOverview"] },
-        (old) => {
-          if (!old) return old;
-          return {
-            ...old,
-            featuredCreators: old.featuredCreators.map((c) =>
-              c.userId === creator.userId
-                ? {
-                    ...c,
-                    following: result.following,
-                    requested: result.requested,
-                    followers: Math.max(
-                      0,
-                      c.followers +
-                        (result.following ? 1 : c.following ? -1 : 0),
-                    ),
-                  }
-                : c,
-            ),
-          };
-        },
-      );
-      if (result.requested) {
-        notify(
-          "Request sent",
-          "This account is private. You'll see their posts once they accept.",
-        );
-      } else if (result.following) {
-        haptic.success();
-      }
-      void queryClient.invalidateQueries({ queryKey: ["feed", "following"] });
+      // Says what it wants (follow / stop) and updates every screen showing this creator (src/lib/follow.ts).
+      await setFollow(queryClient, creator.userId, wantsFollow(creator));
     } catch (error) {
       showError(error);
     } finally {
@@ -1810,7 +1755,10 @@ export default function Explore() {
                   </Txt>
                 </View>
                 <JoinButton
-                  joined={c.joined}
+                  joined={c.joined || c.pending}
+                  check={c.joined}
+                  label={joinButtonLabel(c)}
+                  joinedLabel={joinButtonLabel(c)}
                   index={idx}
                   size="sm"
                   busy={busyKey === `join:${c.id}`}
@@ -1881,13 +1829,16 @@ function PopularCommunityPortraitCard({
           {compactNumber(c.memberCount)} members
         </Txt>
         <JoinButton
-          joined={c.joined}
+          joined={c.joined || c.pending}
+          check={c.joined}
+          label={joinButtonLabel(c)}
+          joinedLabel={joinButtonLabel(c)}
           color={color}
           size="sm"
           full
           busy={busy}
           onPress={onJoin}
-          accessibilityLabel={c.joined ? `Leave ${c.name}` : `Join ${c.name}`}
+          accessibilityLabel={c.joined ? `Leave ${c.name}` : c.pending ? `Your request to join ${c.name}` : `Join ${c.name}`}
           style={{ marginTop: 6, height: 26 }}
         />
       </View>

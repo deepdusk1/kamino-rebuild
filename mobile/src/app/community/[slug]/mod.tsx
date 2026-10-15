@@ -34,6 +34,8 @@ function Moderation() {
     void queryClient.invalidateQueries({ queryKey: ["community", slug] });
     void queryClient.invalidateQueries({ queryKey: ["safety", slug] });
     void queryClient.invalidateQueries({ queryKey: ['mod-details',slug] });
+    void queryClient.invalidateQueries({ queryKey: ["communityMembers", slug] });
+    void queryClient.invalidateQueries({ queryKey: ["communityOverview", slug] });
   };
 
   if (mod.isPending || page.isPending) return <Loading />;
@@ -66,7 +68,7 @@ function Moderation() {
         {tab === "safety" ? <SafetyTab slug={slug!} /> : null}
         {tab === "reports" ? <ReportsTab slug={slug!} reports={data.reports} onChanged={refresh} /> : null}
         {tab === "requests" ? <RequestsTab slug={slug!} pending={data.pending} answers={data.joinAnswers} questions={data.joinQuestions.map((q) => q.prompt)} onChanged={refresh} /> : null}
-        {tab === "people" ? <PeopleTab slug={slug!} members={page.data?.members ?? []} strikeCounts={strikeCounts} myRole={data.role} myId={me.data?.profile.userId} onChanged={refresh} /> : null}
+        {tab === "people" ? <PeopleTab slug={slug!} strikeCounts={strikeCounts} myRole={data.role} myId={me.data?.profile.userId} onChanged={refresh} /> : null}
         {tab === 'bans' ? <BansTab slug={slug!} onChanged={refresh}/> :null}
         {tab === 'audit' ? <AuditTab slug={slug!}/> :null}
         {tab === "appeals" ? <AppealsTab slug={slug!} appeals={appeals.data ?? []} onChanged={refresh} /> : null}

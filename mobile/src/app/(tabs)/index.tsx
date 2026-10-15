@@ -1,7 +1,7 @@
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router } from "expo-router";
 import { useRef, useState } from "react";
-import { Alert, FlatList, View } from "react-native";
+import { FlatList, View } from "react-native";
 import { api } from "@/api/endpoints";
 import type { FeedPost, HomeOverview } from "@/api/models";
 import type { CommunityCardData, FeedTab } from "@/api/types";
@@ -14,6 +14,8 @@ import { AppHeader, CategoryChips, SectionHeader, TabsUnderline } from "@/compon
 import { EmptyState, ErrorState, Loading, SkeletonList, useTabBarSpace } from "@/components/ui";
 import { showError } from "@/lib/errors";
 import { haptic } from "@/lib/haptics";
+import { tapJoinButton } from "@/lib/community-join";
+import { setFollow, wantsFollow } from "@/lib/follow";
 
 /**
  * Home (mockup 03-home): header, hero banners, category chips (they filter the cards below), Recommended and
@@ -66,23 +68,11 @@ export default function Home() {
     });
 
   async function toggleJoin(c: CommunityCardData) {
-    // Private communities ask questions first: their page has the join form.
-    if (!c.joined && c.visibility === "private") return router.push(`/community/${c.id}`);
     setBusy(c.id);
     try {
-      if (c.joined) {
-        await api.leave(c.id);
-        patchCommunity(c.id, false);
-      } else {
-        const result = await api.join({ slug: c.id });
-        if (result.pending) Alert.alert("Request sent", "The leaders will review your request. You'll get a notification when you're in.");
-        else {
-          haptic.success();
-          patchCommunity(c.id, true);
-        }
-      }
-      void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
-      void queryClient.invalidateQueries({ queryKey: ["feed"] });
+      // Leaving asks first; private, approval and invite-only communities open their page (join questions, invites).
+      const next = await tapJoinButton(queryClient, c);
+      if (next !== null) patchCommunity(c.id, next);
     } catch (error) {
       showError(error);
     } finally {
@@ -91,15 +81,11 @@ export default function Home() {
   }
 
   async function toggleFollow(userId: string) {
+    const creator = overview.data?.featuredCreators.find((c) => c.userId === userId);
     setBusy(userId);
     try {
-      const result = await api.followProfile(userId);
-      patchOverview((o) => ({
-        ...o,
-        featuredCreators: o.featuredCreators.map((c) => (c.userId === userId ? { ...c, following: result.following, requested: result.requested, followers: c.followers + (result.following ? 1 : c.following ? -1 : 0) } : c)),
-      }));
-      if (result.requested) Alert.alert("Request sent", "This account is private. You'll see their posts once they accept.");
-      void queryClient.invalidateQueries({ queryKey: ["feed", "following"] });
+      // Says what it wants (follow / stop), so an out-of-date card can never flip the wrong way.
+      await setFollow(queryClient, userId, creator ? wantsFollow(creator) : true);
     } catch (error) {
       showError(error);
     } finally {

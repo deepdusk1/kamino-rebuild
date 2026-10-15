@@ -34,6 +34,7 @@ import { defaultCover } from "@/lib/brandArt";
 import { errorMessage, showError } from "@/lib/errors";
 import { compactNumber, levelFromRep, plainPreview, timeAgo } from "@/lib/format";
 import { haptic } from "@/lib/haptics";
+import { joinButtonLabel, leaveCommunity } from "@/lib/community-join";
 import { font, radius, shadow, useTheme } from "@/theme";
 
 type Section = "home" | "rooms" | "events" | "media";
@@ -116,6 +117,8 @@ function CommunityHomeScreen() {
   const c = d.community;
   const member = d.member && d.member.status === "active" ? d.member : null;
   const pending = d.member?.status === "pending";
+  const removed = d.member?.status === "banned";
+  const isOwner = member?.role === "agent";
   const canModerate = Boolean(member && MOD_ROLES.has(member.role));
   const level = member ? levelFromRep(member.rep) : 0;
   const coverSource = c.cover ? serverImage(c.cover) : defaultCover(c.hue);
@@ -151,11 +154,11 @@ function CommunityHomeScreen() {
     }
   };
 
+  /** Leaves (or cancels a waiting request) after asking first. */
   const leave = async () => {
     setBusy("leave");
     try {
-      await api.leave(slug);
-      await queryClient.invalidateQueries();
+      await leaveCommunity(queryClient, { id: slug, name: c.name, pending });
     } catch (error) {
       showError(error);
     } finally {
@@ -196,7 +199,7 @@ function CommunityHomeScreen() {
     ...(canModerate
       ? [{ key: "mod", label: "Moderation", icon: "construct-outline" as const, tone: "violet" as const, onPress: () => router.push(`/community/${slug}/mod`) }]
       : []),
-    ...(member
+    ...(member && !isOwner
       ? [
           {
             key: "leave",
@@ -205,6 +208,18 @@ function CommunityHomeScreen() {
             destructive: true,
             hint: "Your reputation is kept if you come back",
             onPress: () => void leave(),
+          },
+        ]
+      : []),
+    ...(isOwner
+      ? [
+          {
+            key: "owner",
+            label: "Hand over ownership",
+            icon: "key-outline" as const,
+            tone: "violet" as const,
+            hint: "Make a co-leader the owner (then you can leave)",
+            onPress: () => router.push(`/community/${slug}/mod`),
           },
         ]
       : []),
@@ -260,12 +275,14 @@ function CommunityHomeScreen() {
               <GradientButton label="Post" icon="create-outline" size="sm" onPress={() => router.push(`/community/${slug}/compose`)} />
             ) : (
               <JoinButton
-                joined={false}
-                label={pending ? "Requested" : c.visibility === "private" ? "Ask to join" : "Join"}
+                joined={pending || removed}
+                check={false}
+                label={joinButtonLabel({ ...c, joined: false, pending })}
+                joinedLabel={removed ? "Removed" : "Requested"}
                 size="md"
-                busy={busy === "join"}
-                onPress={() => (pending ? notify("Request sent", "The leaders will review it soon.") : setJoinOpen(true))}
-                accessibilityLabel={`Join ${c.name}`}
+                busy={busy === "leave"}
+                onPress={() => (removed ? router.push(`/community/${slug}/standing`) : pending ? void leave() : setJoinOpen(true))}
+                accessibilityLabel={removed ? "You were removed. See your standing and appeal" : pending ? "Cancel your join request" : `Join ${c.name}`}
               />
             )}
           </View>
@@ -362,14 +379,25 @@ function CommunityHomeScreen() {
 
         {d.locked ? (
           <View style={{ padding: 16 }}>
-            <EmptyHint
-              emoji="🔒"
-              title="This community is private"
-              text={pending ? "Your request is waiting for a leader to review it." : "Ask to join to see its posts, rooms and events."}
-              actionLabel={pending ? undefined : "Ask to join"}
-              onAction={pending ? undefined : () => setJoinOpen(true)}
-              style={{ marginHorizontal: 0 }}
-            />
+            {removed ? (
+              <EmptyHint
+                emoji="🚫"
+                title="You were removed from this community"
+                text="You can see why and send the leaders an appeal."
+                actionLabel="See your standing"
+                onAction={() => router.push(`/community/${slug}/standing`)}
+                style={{ marginHorizontal: 0 }}
+              />
+            ) : (
+              <EmptyHint
+                emoji="🔒"
+                title="This community is private"
+                text={pending ? "Your request is waiting for a leader to review it." : "Ask to join to see its posts, rooms and events."}
+                actionLabel={pending ? "Cancel request" : "Ask to join"}
+                onAction={pending ? () => void leave() : () => setJoinOpen(true)}
+                style={{ marginHorizontal: 0 }}
+              />
+            )}
           </View>
         ) : (
           <View style={{ gap: 18, marginTop: 14 }}>

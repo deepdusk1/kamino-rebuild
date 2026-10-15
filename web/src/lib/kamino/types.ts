@@ -43,7 +43,11 @@ export type Community = {
   language: string;
   /** A blue tick set by the site owner. */
   verified: boolean;
+  /** How people get in: "open", "approval" (leaders accept requests) or "invite" (an invite code is needed). */
+  joinPolicy: JoinPolicy;
 };
+
+export type JoinPolicy = "open" | "approval" | "invite";
 
 export type Membership = {
   userId: string;
@@ -577,6 +581,8 @@ export type Hero = { id: string; title: string; text: string; cta: string; href:
 /** A community as the cards show it: joined or not, how many are online, and up to four member faces. */
 export type CommunityCardData = Community & {
   joined: boolean;
+  /** The viewer asked to join and a leader hasn't answered yet. */
+  pending: boolean;
   onlineCount: number;
   memberFaces: AuthorChip[];
 };

@@ -31,6 +31,8 @@ export const POLICIES = {
   message: { limit: 45, windowMs: 60_000 },
   report: { limit: 10, windowMs: 60_000 },
   community: { limit: 6, windowMs: 3_600_000 },
+  /** Joining communities (onboarding joins several at once, so this is generous). */
+  join: { limit: 40, windowMs: 600_000 },
   follow: { limit: 60, windowMs: 60_000 },
   invite: { limit: 30, windowMs: 60_000 },
   upload: { limit: 20, windowMs: 60_000 },

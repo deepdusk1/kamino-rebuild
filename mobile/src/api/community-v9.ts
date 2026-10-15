@@ -24,6 +24,10 @@ export const communityV9={
   deleteRole:(slug:string,id:number)=>rpc('deleteCommunityRole',{slug,id}),
   assignRole:(slug:string,userId:string,roleId:number,remove=false)=>rpc('assignCommunityRole',{slug,userId,roleId,remove}),
   appoint:(slug:string,userId:string,role:'leader'|'curator'|'member')=>rpc('appointCommunityLeader',{slug,userId,role}),
+  /** Owner only: hands the community to a co-leader (the old owner stays a co-leader). */
+  transferOwnership:(slug:string,userId:string)=>rpc<{ok:boolean}>('transferCommunityOwnership',{slug,userId}),
+  /** Active members, 50 at a time (`next` is the offset for the next page, or null). Searches nickname and @username. */
+  members:(slug:string,q='',offset=0)=>rpc<{members:Membership[];next:number|null}>('listCommunityMembers',{slug,q,offset}),
   modDetails:(slug:string)=>rpc<CommunityModData>('getCommunityModerationDetails',slug),
   analytics:(slug:string)=>rpc<CommunityAnalytics>('getCommunityAnalytics',slug),
   verify:(slug:string,reason:string)=>rpc('requestCommunityVerification',{slug,reason}),

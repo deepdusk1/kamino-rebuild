@@ -11,6 +11,7 @@ import { AppHeader, EmptyHint, FilterPills, GradientButton, NotificationRow, Per
 import { StackNav } from "@/components/profile/StackNav";
 import { collapseChats, eventWhen, groupByDay, notificationKind, notificationRoute } from "@/components/profile/helpers";
 import { ErrorState, PressableScale, SkeletonList, Txt, useTabBarSpace } from "@/components/ui";
+import { setFollow } from "@/lib/follow";
 import { errorMessage } from "@/lib/errors";
 import { compactNumber, timeAgo } from "@/lib/format";
 import { appHrefFromServerHref } from "@/lib/hrefs";
@@ -37,7 +38,7 @@ export default function Notifications() {
   const tabSpace = useTabBarSpace();
   const [filter, setFilter] = useState<NotificationFilter>("all");
   // What the person did on this screen, so buttons change straight away.
-  const [followed, setFollowed] = useState<Record<string, "following" | "requested">>({});
+  const [followed, setFollowed] = useState<Record<string, "following" | "requested" | undefined>>({});
   const [joined, setJoined] = useState<Record<string, "joined" | "requested">>({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -71,11 +72,12 @@ export default function Notifications() {
   };
 
   const followBack = async (item: NotificationItem) => {
+    // "Follow Back" only ever follows. (It used to toggle, so a second tap unfollowed and then showed "Requested".)
+    if (followed[item.actionTarget] ?? (item.actorFollowed ? "following" : undefined)) return;
     setBusy(`n${item.id}`);
     try {
-      const result = await api.followProfile(item.actionTarget);
-      setFollowed((m) => ({ ...m, [item.actionTarget]: result.following ? "following" : "requested" }));
-      void queryClient.invalidateQueries({ queryKey: ["profileOverview"] });
+      const result = await setFollow(queryClient, item.actionTarget, true);
+      setFollowed((m) => ({ ...m, [item.actionTarget]: result.following ? "following" : result.requested ? "requested" : undefined }));
     } catch (error) {
       notify("Couldn't follow", errorMessage(error));
     } finally {

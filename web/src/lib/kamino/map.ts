@@ -65,6 +65,7 @@ export function mapCommunity(row: Record<string, unknown>): Community {
     topics: cleanTopics(parseJson<unknown>(row.topics, [])),
     language: String(row.language ?? "en") || "en",
     verified: asBool(row.verified),
+    joinPolicy: row.join_policy === "approval" || row.join_policy === "invite" ? row.join_policy : "open",
   };
 }
 
