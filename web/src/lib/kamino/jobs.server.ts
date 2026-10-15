@@ -19,6 +19,90 @@ import { reconcileMissingEarnings } from "./money.server";
 type Row = Record<string, unknown>;
 type Sql = Awaited<ReturnType<typeof internals.db>>;
 
+/**
+ * Whether a queued push may go out now: "cancel" when the person can no longer see it or turned that kind of push
+ * off, "quiet" during their quiet hours, otherwise "allow". Checked again at send time because settings, blocks and
+ * access can change after the push was queued.
+ */
+async function pushAllowedNow(sql: Sql, notification: Row): Promise<"allow" | "quiet" | "cancel"> {
+  const userId = String(notification.user_id),
+    prefs = parseNotifyPrefs(notification.notify_prefs),
+    kind = String(notification.kind);
+  try {
+    await internals.assertAccountAllowed(sql, userId);
+  } catch {
+    return "cancel";
+  }
+  const visible = await sql.query(
+    `select 1 from notifications n where n.id=$1 and n.user_id=$2 and (${internals.notificationAccessSql("$2", "n")})`,
+    [notification.id, userId],
+  );
+  if (!visible.length) return "cancel";
+  const switches: Record<string, unknown> = {
+    like: notification.notify_likes,
+    comment: notification.notify_comments,
+    follow: notification.notify_follows,
+    follow_request: notification.notify_follows,
+    chat: notification.notify_chat,
+    wall: notification.notify_wall,
+  };
+  if (kind in switches && switches[kind] !== true) return "cancel";
+  if (
+    notification.actor_id &&
+    muteSilences(kind) &&
+    (
+      await sql`select 1 from muted_people where user_id=${userId} and muted_user_id=${String(notification.actor_id)}`
+    ).length
+  )
+    return "cancel";
+  if (kind === "digest") {
+    if (!prefs.digest) return "cancel";
+    return inQuietHours(
+      localHour(new Date(), String(notification.timezone ?? "")),
+      notification.quiet_start == null ? null : Number(notification.quiet_start),
+      notification.quiet_end == null ? null : Number(notification.quiet_end),
+    )
+      ? "quiet"
+      : "allow";
+  }
+  if (
+    !shouldPush({
+      kind: String(notification.kind),
+      prefs,
+      quietStart: null,
+      quietEnd: null,
+      timezone: String(notification.timezone ?? ""),
+    })
+  )
+    return "cancel";
+  if (
+    !shouldPush({
+      kind: String(notification.kind),
+      prefs,
+      quietStart: notification.quiet_start == null ? null : Number(notification.quiet_start),
+      quietEnd: notification.quiet_end == null ? null : Number(notification.quiet_end),
+      timezone: String(notification.timezone ?? ""),
+    })
+  )
+    return "quiet";
+  return "allow";
+}
+
+/**
+ * Sends one notification's pushes straight away instead of waiting for the once-a-minute scheduler. Used for calls,
+ * which are useless if they ring late. Never throws: anything left over is retried by the scheduler as usual.
+ */
+export async function deliverPushNow(sql: Sql, notificationId: number): Promise<void> {
+  try {
+    await processPushDeliveries(sql, {
+      notificationId,
+      allowed: (notification) => pushAllowedNow(sql, notification),
+    });
+  } catch {
+    console.warn("[push] Immediate delivery failed; the scheduler will retry.");
+  }
+}
+
 async function deliver(
   sql: Sql,
   p: Row,
@@ -193,71 +277,7 @@ export async function runNotificationJobs() {
           String(campaign.body),
           String(campaign.href),
         );
-  const push = await processPushDeliveries(sql, {
-    allowed: async (notification) => {
-      const userId = String(notification.user_id),
-        prefs = parseNotifyPrefs(notification.notify_prefs),
-        kind = String(notification.kind);
-      try {
-        await internals.assertAccountAllowed(sql, userId);
-      } catch {
-        return "cancel";
-      }
-      const visible = await sql.query(
-        `select 1 from notifications n where n.id=$1 and n.user_id=$2 and (${internals.notificationAccessSql("$2", "n")})`,
-        [notification.id, userId],
-      );
-      if (!visible.length) return "cancel";
-      const switches: Record<string, unknown> = {
-        like: notification.notify_likes,
-        comment: notification.notify_comments,
-        follow: notification.notify_follows,
-        follow_request: notification.notify_follows,
-        chat: notification.notify_chat,
-        wall: notification.notify_wall,
-      };
-      if (kind in switches && switches[kind] !== true) return "cancel";
-      if (
-        notification.actor_id &&
-        muteSilences(kind) &&
-        (
-          await sql`select 1 from muted_people where user_id=${userId} and muted_user_id=${String(notification.actor_id)}`
-        ).length
-      )
-        return "cancel";
-      if (kind === "digest") {
-        if (!prefs.digest) return "cancel";
-        return inQuietHours(
-          localHour(new Date(), String(notification.timezone ?? "")),
-          notification.quiet_start == null ? null : Number(notification.quiet_start),
-          notification.quiet_end == null ? null : Number(notification.quiet_end),
-        )
-          ? "quiet"
-          : "allow";
-      }
-      if (
-        !shouldPush({
-          kind: String(notification.kind),
-          prefs,
-          quietStart: null,
-          quietEnd: null,
-          timezone: String(notification.timezone ?? ""),
-        })
-      )
-        return "cancel";
-      if (
-        !shouldPush({
-          kind: String(notification.kind),
-          prefs,
-          quietStart: notification.quiet_start == null ? null : Number(notification.quiet_start),
-          quietEnd: notification.quiet_end == null ? null : Number(notification.quiet_end),
-          timezone: String(notification.timezone ?? ""),
-        })
-      )
-        return "quiet";
-      return "allow";
-    },
-  });
+  const push = await processPushDeliveries(sql, { allowed: (notification) => pushAllowedNow(sql, notification) });
   const email = await processEmailDigests(sql, {
     compose: async (userId, week) => {
       const row = (

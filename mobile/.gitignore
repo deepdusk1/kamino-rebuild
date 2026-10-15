@@ -11,3 +11,6 @@ android/
 *.p8
 *.p12
 *.mobileprovision
+# Firebase service-account keys are secrets (google-services.json itself is fine to commit)
+*firebase-adminsdk*.json
+service-account*.json

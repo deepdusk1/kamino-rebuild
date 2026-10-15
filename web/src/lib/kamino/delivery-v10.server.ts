@@ -19,6 +19,89 @@ const safeHref = (href: unknown) =>
     ? href
     : "/notifications";
 
+/** How long a call push may ring for. After this the caller has usually given up, so the push is dropped. */
+export const CALL_RING_SECONDS = 45;
+
+/**
+ * Android notification channels the phone app creates (mobile/src/lib/push.ts, PUSH_CHANNELS). A push naming a channel
+ * the phone doesn't have is not shown at all, so these ids must match the app exactly.
+ */
+export const PUSH_CHANNEL_IDS = {
+  calls: "kamino_calls_critical_v2",
+  messages: "kamino_messages_high_v2",
+  events: "kamino_events_high_v2",
+  general: "kamino_general_v2",
+} as const;
+
+/** Notification action sets the phone app registers (PUSH_CATEGORIES in the app). */
+export const PUSH_CATEGORY_IDS = {
+  call: "KAMINO_INCOMING_CALL",
+  chat: "KAMINO_CHAT_MESSAGE",
+  live: "KAMINO_LIVE_EVENT",
+} as const;
+
+type PushKind = "call" | "chat" | "live" | "general";
+
+/** Sorts a notification into the four push styles, using the same rules as the phone app. */
+export function pushKindOf(kind: string, href: string): PushKind {
+  if (kind === "call" || /[?&]call=1\b/.test(href)) return "call";
+  if (["live", "event", "events", "watch_party"].includes(kind) || href.startsWith("/live/")) return "live";
+  if (["chat", "message", "dm"].includes(kind) || /^\/chats\/\d+/.test(href)) return "chat";
+  return "general";
+}
+
+/**
+ * The message sent to Expo's push service for one notification. Expo hands it to Firebase (Android) or APNs (iOS).
+ *
+ * - The lock-screen text only says what kind of thing happened ("New message"), never who sent it or what it says:
+ *   the phone may be locked in someone else's hands. The app shows the details once opened.
+ * - `priority: "high"` lets Android wake a sleeping or closed app straight away instead of batching the push.
+ * - `channelId` picks the app's loud channel for calls and messages (sound, heads-up banner).
+ * - A call only rings for CALL_RING_SECONDS; a ring that arrives a minute late is useless.
+ */
+export function buildExpoPushMessage(
+  token: string,
+  n: { id?: unknown; kind?: unknown; href?: unknown },
+) {
+  const href = safeHref(n.href);
+  const style = pushKindOf(String(n.kind ?? ""), href);
+  const roomId = Number(/^\/(?:chats|live)\/(\d+)/.exec(href)?.[1] ?? 0) || undefined;
+  const text: Record<PushKind, { title: string; body: string }> = {
+    call: { title: "Incoming call", body: "Open Kamino to answer." },
+    chat: { title: "New message", body: "Open Kamino to read it." },
+    live: { title: "Happening now on Kamino", body: "Open Kamino to see what's on." },
+    general: { title: "Kamino", body: "You have a new notification. Open Kamino to view it." },
+  };
+  const channel: Record<PushKind, string> = {
+    call: PUSH_CHANNEL_IDS.calls,
+    chat: PUSH_CHANNEL_IDS.messages,
+    live: PUSH_CHANNEL_IDS.events,
+    general: PUSH_CHANNEL_IDS.general,
+  };
+  const category: Partial<Record<PushKind, string>> = {
+    call: PUSH_CATEGORY_IDS.call,
+    // Reply / Mark as read need a room to act on.
+    chat: roomId ? PUSH_CATEGORY_IDS.chat : undefined,
+    live: PUSH_CATEGORY_IDS.live,
+  };
+  const notificationId = Number(n.id) || undefined;
+  return {
+    to: token,
+    ...text[style],
+    sound: "default",
+    priority: "high" as const,
+    channelId: channel[style],
+    ...(category[style] ? { categoryId: category[style] } : {}),
+    ttl: style === "call" ? CALL_RING_SECONDS : 86400,
+    data: {
+      href,
+      kind: style === "general" ? String(n.kind ?? "") : style,
+      ...(roomId ? { roomId } : {}),
+      ...(notificationId ? { notificationId } : {}),
+    },
+  };
+}
+
 /** Fixed totals are privacy-safe and keep retries identical within provider idempotency limits. */
 export async function enqueueWeeklyDigest(
   sql: Sql,
@@ -49,6 +132,8 @@ export async function processPushDeliveries(
     now?: Date;
     request?: typeof fetch;
     allowed: (row: Row) => Promise<"allow" | "quiet" | "cancel">;
+    /** Only deliver this notification's pushes (used to ring a call right away instead of waiting for the scheduler). */
+    notificationId?: number;
   },
 ) {
   const result = {
@@ -74,10 +159,11 @@ export async function processPushDeliveries(
   const rows = await sql.query<Row>(
     `with due as (select id from push_delivery_queue
     where status in ('pending','receipt') and next_attempt_at<=$1 and (lease_until is null or lease_until<$1)
+    and ($4::int is null or notification_id=$4)
     order by id for update skip locked limit $2)
     update push_delivery_queue q set lease_token=$3,lease_until=$1::timestamptz+interval '2 minutes'
     from due where q.id=due.id returning q.*`,
-    [now.toISOString(), limit, lease],
+    [now.toISOString(), limit, lease, options.notificationId ?? null],
   );
   const request = options.request ?? fetch;
   const headers: Record<string, string> = {
@@ -114,9 +200,23 @@ export async function processPushDeliveries(
           result.cancelled++;
           continue;
         }
+        const isCall = pushKindOf(String(n.kind ?? ""), safeHref(n.href)) === "call";
+        const createdAt =
+          n.created_at instanceof Date ? n.created_at.getTime() : new Date(String(n.created_at)).getTime();
+        if (!receipt && isCall && now.getTime() - createdAt > CALL_RING_SECONDS * 1000) {
+          await finish("cancelled", "call is over");
+          result.cancelled++;
+          continue;
+        }
         const allowed = await options.allowed(n);
         if (allowed === "cancel") {
           await finish("cancelled", "recipient preferences or access changed");
+          result.cancelled++;
+          continue;
+        }
+        if (allowed === "quiet" && isCall) {
+          // A call can't wait for quiet hours to end; the in-app list still shows it as missed.
+          await finish("cancelled", "quiet hours");
           result.cancelled++;
           continue;
         }
@@ -128,19 +228,8 @@ export async function processPushDeliveries(
           result.deferred++;
           continue;
         }
-        // Never put another member's text, identity, community or media on a lock screen.
-        const body = receipt
-          ? { ids: [String(row.ticket_id)] }
-          : [
-              {
-                to: String(row.token),
-                title: "Kamino",
-                body: "You have a new notification. Open Kamino to view it.",
-                sound: "default",
-                ttl: 86400,
-                data: { href: safeHref(n.href) },
-              },
-            ];
+        // Never put another member's text, identity, community or media on a lock screen (see buildExpoPushMessage).
+        const body = receipt ? { ids: [String(row.ticket_id)] } : [buildExpoPushMessage(String(row.token), n)];
         const response = await request(
           `https://exp.host/--/api/v2/push/${receipt ? "getReceipts" : "send"}`,
           {
