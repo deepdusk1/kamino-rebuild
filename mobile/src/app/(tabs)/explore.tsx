@@ -1048,8 +1048,8 @@ export default function Explore() {
                           color: theme.muted,
                         }}
                       >
-                        Get personalized fandom recommendations based on your
-                        interests, activity, and mood.
+                        Tell it what you&apos;re into and it suggests
+                        communities to join.
                       </Txt>
                     </View>
 
@@ -1061,7 +1061,7 @@ export default function Explore() {
                         }
                       }}
                       accessibilityRole="button"
-                      accessibilityLabel="Explore for Me with AI"
+                      accessibilityLabel="Ask AI to find communities for you"
                       scaleTo={0.95}
                       style={[
                         styles.exploreForMeBtn,
@@ -1086,13 +1086,8 @@ export default function Explore() {
                           color: "#FFFFFF",
                         }}
                       >
-                        Explore for Me
+                        Ask AI
                       </Txt>
-                      <Ionicons
-                        name="chevron-forward"
-                        size={13}
-                        color="#FFFFFF"
-                      />
                     </PressableScale>
                   </LinearGradient>
                 </View>
