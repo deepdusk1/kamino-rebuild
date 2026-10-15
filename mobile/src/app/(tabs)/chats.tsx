@@ -18,11 +18,6 @@ import { useSSEListener } from "@/api/sse";
 import type { ChatOverviewRoom } from "@/api/types";
 import { contentApi } from "@/lib/content-v9";
 
-/**
- * A chat-list row: exactly the fields `normalizeOverviewRoom` reads from the server (including the colour,
- * live head-count and `privateGroup`, a private group chat — the only kind you can leave from the list).
- */
-type InboxRoom = NonNullable<ReturnType<typeof normalizeOverviewRoom>>;
 import { ActionMenu, type MenuItem } from "@/components/community/ActionMenu";
 import { confirmAction, notify } from "@/components/community/platform";
 import {
@@ -50,6 +45,12 @@ import { haptic } from "@/lib/haptics";
 import { previewText } from "@/lib/stickers";
 import { useDebounced } from "@/lib/useDebounced";
 import { font, radius, shadow, useTheme } from "@/theme";
+
+/**
+ * A chat-list row: exactly the fields `normalizeOverviewRoom` reads from the server (including the colour,
+ * live head-count and `privateGroup`, a private group chat — the only kind you can leave from the list).
+ */
+type InboxRoom = NonNullable<ReturnType<typeof normalizeOverviewRoom>>;
 
 type ChatFolderTab = "inbox" | "groups" | "requests";
 
@@ -290,7 +291,7 @@ export default function ChatsTabScreen() {
     }
   });
 
-  const allRooms = roomsQuery.data?.rooms ?? [];
+  const allRooms = useMemo(() => roomsQuery.data?.rooms ?? [], [roomsQuery.data?.rooms]);
 
   // Compute unread badge counts per folder tab
   const folderCounts = useMemo(() => {
@@ -464,13 +465,8 @@ export default function ChatsTabScreen() {
     if (room.unread > 0) {
       patchRoomInCache(room.id, (r) => ({ ...r, unread: 0 }));
     }
-    if (room.kind === "voice") {
-      router.push(`/live/${room.id}`);
-    } else if (room.kind === "screening") {
-      router.push(`/chat/watch/${room.id}`);
-    } else {
-      router.push(`/chat/${room.id}`);
-    }
+    // Voice and watch rooms open in the chat room too: it has the stage controls and the "watch together" button.
+    router.push(`/chat/${room.id}`);
   };
 
   const roomMenuItems: MenuItem[] = selectedRoom

@@ -483,10 +483,6 @@ function Navigation() {
             options={{ title: "Story" }}
           />
           <Stack.Screen
-            name="community/[slug]/story/[sceneId]"
-            options={{ headerShown: false }}
-          />
-          <Stack.Screen
             name="chat/[roomId]"
             options={{ headerShown: false }}
           />

@@ -1,7 +1,6 @@
 // ===== FILE: mobile/src/components/profile/ProfileScreen.tsx =====
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
 import { useState } from "react";
 import {
@@ -29,7 +28,6 @@ import {
   AppHeader,
   EmptyHint,
   GradientButton,
-  Picture,
   Pill,
   PostTile,
   SectionHeader,
@@ -50,7 +48,7 @@ import {
   Txt,
   useTabBarSpace,
 } from "@/components/ui";
-import { defaultCover, heroArt } from "@/lib/brandArt";
+import { defaultCover } from "@/lib/brandArt";
 import { errorMessage } from "@/lib/errors";
 import { compactNumber, plainPreview, timeAgo } from "@/lib/format";
 import { haptic } from "@/lib/haptics";

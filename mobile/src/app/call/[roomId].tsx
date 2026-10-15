@@ -94,9 +94,7 @@ export default function CallScreen() {
       }
       try {
         const fb = await api.getLiveKitJoin(roomId);
-        if (fb && typeof fb.url === "string" && typeof fb.token === "string") {
-          return fb;
-        }
+        if (fb.enabled) return { url: fb.url, token: fb.token };
       } catch {
         // When LiveKit SFU is not configured, `useCall` activates the P2P WebRTC fallback (`CallSession` / `/api/rtc`)
       }
@@ -143,14 +141,15 @@ export default function CallScreen() {
 
   // Track active call duration once at least one peer is connected
   useEffect(() => {
-    if (connectedCount === 0 || call.status !== "active") {
-      setCallSeconds(0);
-      return;
-    }
+    if (connectedCount === 0 || call.status !== "active") return;
     const interval = setInterval(() => {
       setCallSeconds((s) => s + 1);
     }, 1_000);
-    return () => clearInterval(interval);
+    // Reset when the call stops being connected, so a reconnect starts from 0:00.
+    return () => {
+      clearInterval(interval);
+      setCallSeconds(0);
+    };
   }, [connectedCount, call.status]);
 
   // WhatsApp behavior: DM call unanswered after 30s logs a missed call
