@@ -78,3 +78,8 @@ export function plainPreview(markdown: string): string {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/** A member's level inside a community from their reputation there (same rule as the website: 40 rep per level). */
+export function levelFromRep(rep: number): number {
+  return Math.max(1, 1 + Math.floor(Math.max(0, rep) / 40));
+}

@@ -57,7 +57,7 @@ import { haptic } from "@/lib/haptics";
 import { tellIfHeld } from "@/lib/held";
 import { pickAvatar, pickPhoto } from "@/lib/media";
 import { font, radius, shadow, useTheme, type Tone } from "@/theme";
-import { ProfileIdentity } from "./ProfileIdentity";
+import { ProfileAbout, interestLabel, useProfileIdentity } from "./ProfileIdentity";
 import {
   BadgeRow,
   CommunityTile,
@@ -92,17 +92,15 @@ type AiAssistantRpcResult = {
 };
 
 /**
- * Profile Screen (`mobile/src/components/profile/ProfileScreen.tsx`) — Pixel-faithful to Mockup 4 (Profile Screen):
- * - Banner cover image + profile avatar + online status dot + Back / Share / More buttons
- * - Display name + Verified tick + @handle + Level badge (`Lv. 12`) + `Creator` & `Top Fan` pills
- * - Stats row (`Posts`, `Followers`, `Following`) wired to `FollowListSheet` & `ProfilePostsSheet`
- * - `✨ AI Bio` generator button wired to `rpc("aiAssistant", { task: "caption", text })` (`platform.ai("caption", ...)`)
- * - "Customize Your Profile" theme & banner picker tray
- * - 5 Tabs: Posts · Collections · Communities · Media · Achievements
- * - Pinned Posts 2-column showcase grid (`PostTile`)
- * - My Top Fandoms 4-tile grid + Current Streak 7-Day Milestone banner
- * - Creator Insights card wired to `rpc("getCreatorDashboard", {})` / `platform.creator()`
- * - Support My Work supporter tip tier card with interactive contribution modal
+ * Profile screen (own profile in the Profile tab, anyone else's at /profile/[handle]).
+ *
+ * Header: cover, avatar, name + verified tick, @handle, real badges only (Creator, reputation, supporter badges,
+ * headline, pronouns), Edit/Follow + menu, bio (or an "Add a bio" prompt with an AI draft on your own profile),
+ * location / website / joined, and the Posts · Followers · Following counts.
+ *
+ * Body: shortcut pills (Posts · Stories & media · Communities · Achievements), an About card (interests, links,
+ * people you both follow), recent posts, communities, check-in streak, badges, your own numbers (from the creator
+ * dashboard) and the wall. Every number shown comes from the server; sections without data are hidden.
  */
 export function ProfileScreen({ handle, inTabs }: Props) {
   const theme = useTheme();
@@ -112,7 +110,8 @@ export function ProfileScreen({ handle, inTabs }: Props) {
 
   // Hoisted column width hooks at top level of component (strictly obeys Rules of Hooks)
   const pinnedTileWidth = useColumnWidth(2, { inset: 15, gap: 8 });
-  const communityTileWidth = useColumnWidth(4, { inset: 15, gap: 8 });
+  // Two and a half tiles show at once, so the row reads as scrollable and names stay readable.
+  const communityTileWidth = useColumnWidth(2.5, { inset: 15, gap: 8 });
 
   const overview = useQuery({
     queryKey: ["profileOverview", handle],
@@ -129,7 +128,9 @@ export function ProfileScreen({ handle, inTabs }: Props) {
     queryFn: () => api.profile(handle),
     enabled: Boolean(handle),
   });
+  const identity = useProfileIdentity(handle);
   const creatorDashboard = useQuery({
+    enabled: overview.data?.isSelf === true,
     queryKey: ["creatorDashboard"],
     queryFn: async () => {
       try {
@@ -153,12 +154,10 @@ export function ProfileScreen({ handle, inTabs }: Props) {
   const [achievementsOpen, setAchievementsOpen] = useState(false);
   const [communitiesOpen, setCommunitiesOpen] = useState(false);
   const [safetyOpen, setSafetyOpen] = useState(false);
-  const [supporterSheetOpen, setSupporterSheetOpen] = useState(false);
   const [report, setReport] = useState<ReportTarget | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [wall, setWall] = useState("");
   const [aiBioLoading, setAiBioLoading] = useState(false);
-  const [selectedBannerIdx, setSelectedBannerIdx] = useState(1);
 
   const refresh = async () => {
     await Promise.all([
@@ -178,11 +177,14 @@ export function ProfileScreen({ handle, inTabs }: Props) {
     }
   };
 
+  /** Drafts a short bio from the person's own interests, shows it, and saves it only if they say yes. */
   const handleAiBio = async () => {
     if (aiBioLoading) return;
     setAiBioLoading(true);
     haptic.tap();
-    const prompt = `Write an inspiring, expressive 2-sentence fandom creator bio for @${handle} on Kamino (anime lover, storyteller, and community builder).`;
+    const interests = (identity.data?.interests ?? []).map((k) => interestLabel(k).replace(/^\S+\s/, ""));
+    const about = interests.length ? `They are into ${interests.join(", ")}.` : "Keep it general and friendly.";
+    const prompt = `Write a warm, two-sentence profile bio in the first person for a member of a community app. ${about} No hashtags.`;
     try {
       let bioText = "";
       try {
@@ -195,16 +197,15 @@ export function ProfileScreen({ handle, inTabs }: Props) {
         const fb = await platform.ai("caption", prompt);
         bioText = fb.text.trim();
       }
-      if (bioText) {
-        await api.updateSettings({ bio: bioText });
+      if (!bioText) throw new Error("The AI didn't send a bio back.");
+      const ok = await confirmAction("Use this bio?", bioText, "Use it");
+      if (ok) {
+        await api.updateSettings({ bio: bioText.slice(0, 500) });
         await refresh();
         haptic.success();
       }
-    } catch {
-      notify(
-        "AI Bio Suggestion ✨",
-        "Anime lover, storyteller, and daydreamer. ✨ Sharing theories, fan art, and the moments that make fandoms feel like home.",
-      );
+    } catch (error) {
+      notify("Couldn't draft a bio", `${errorMessage(error)} You can write one in Edit profile.`);
     } finally {
       setAiBioLoading(false);
     }
@@ -422,6 +423,26 @@ export function ProfileScreen({ handle, inTabs }: Props) {
           onPress: () => router.push("/saved"),
         },
         {
+          key: "creator-studio",
+          label: "Creator studio",
+          icon: "stats-chart-outline",
+          tone: "violet",
+          hint: "Your numbers, offers and top posts",
+          onPress: () => router.push("/tools?tab=creator" as never),
+        },
+        ...(p.bio
+          ? [
+              {
+                key: "ai-bio",
+                label: "Rewrite bio with AI",
+                icon: "sparkles-outline" as const,
+                tone: "violet" as const,
+                hint: "You see the draft before anything is saved",
+                onPress: () => void handleAiBio(),
+              },
+            ]
+          : []),
+        {
           key: "safety",
           label: "Safety",
           icon: "shield-checkmark-outline",
@@ -532,6 +553,16 @@ export function ProfileScreen({ handle, inTabs }: Props) {
 
   const locked = d.locked && !isSelf;
   const streakDays = d.streak.days;
+  // Reputation is earned inside communities; the older profile endpoint sends the total.
+  const reputation = old?.stats.reputation ?? 0;
+  const rawStats = creatorDashboard.data?.stats;
+  const creatorStats = rawStats
+    ? [
+        { label: "Post views", value: Number(rawStats.views ?? 0) },
+        { label: "Likes", value: Number(rawStats.likes ?? 0) },
+        { label: "Comments", value: Number(rawStats.comments ?? 0) },
+      ]
+    : null;
   const followLabel = followButtonLabel({
     following: d.following,
     requested: d.requested,
@@ -558,7 +589,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
           cover={
             p.cover
               ? serverImage(p.cover)
-              : defaultCover(p.avatarHue + selectedBannerIdx * 40)
+              : defaultCover(p.avatarHue)
           }
           hue={p.avatarHue}
           person={person}
@@ -575,7 +606,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
           onAvatarPress={isSelf ? () => void changePhoto() : undefined}
         />
 
-        {/* ── Name, Handle, Badges (Creator, Top Fan, Lv. 12) & Follow/Edit CTA ── */}
+        {/* ── Name, handle, real badges & Follow/Edit button ── */}
         <View style={{ paddingHorizontal: 15, marginTop: -16 }}>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
             <Txt
@@ -607,25 +638,29 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                 }}
               >
                 @{p.handle}
-                {"  ·  Lv 12"}
                 {d.followsYou && !isSelf ? "  ·  Follows you" : ""}
               </Txt>
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 5 }}>
-                <Pill
-                  label="Creator"
-                  emoji="👑"
-                  tone="violet"
-                  variant="solid"
-                  style={PILL}
-                />
-                <Pill
-                  label="Top Fan"
-                  emoji="⭐"
-                  tone="pink"
-                  variant="solid"
-                  style={PILL}
-                />
-                <Pill label="Lv. 12" emoji="⚡" tone="blue" style={PILL} />
+                {p.creator ? (
+                  <Pill
+                    label="Creator"
+                    emoji="👑"
+                    tone="violet"
+                    variant="solid"
+                    style={PILL}
+                  />
+                ) : null}
+                {reputation > 0 ? (
+                  <Pill
+                    label={`${compactNumber(reputation)} rep`}
+                    emoji="⚡"
+                    tone="blue"
+                    style={PILL}
+                  />
+                ) : null}
+                {(identity.data?.supporterBadges ?? []).map((badge) => (
+                  <Pill key={badge} label={badge} tone="pink" style={PILL} />
+                ))}
                 {p.headline ? (
                   <Pill
                     label={p.headline}
@@ -753,7 +788,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
             </PressableScale>
           </View>
 
-          {/* Bio + ✨ AI Bio Generator Button */}
+          {/* Bio, or (on your own profile) a prompt to add one */}
           {p.bio ? (
             <Txt
               style={{
@@ -766,33 +801,66 @@ export function ProfileScreen({ handle, inTabs }: Props) {
             >
               {p.bio}
             </Txt>
-          ) : null}
-          {isSelf ? (
-            <PressableScale
-              onPress={() => void handleAiBio()}
-              disabled={aiBioLoading}
-              accessibilityRole="button"
-              accessibilityLabel="Generate AI Bio"
-              scaleTo={0.96}
+          ) : isSelf ? (
+            <View
               style={[
-                styles.aiBioPill,
-                { backgroundColor: theme.tints.violet },
+                styles.addBio,
+                { borderColor: theme.border, backgroundColor: theme.surface },
               ]}
             >
-              <Ionicons name="sparkles" size={12} color={theme.violet} />
               <Txt
                 style={{
-                  fontFamily: font.bold,
-                  fontSize: 11.5,
-                  color: theme.toneText.violet,
+                  flex: 1,
+                  fontFamily: font.regular,
+                  fontSize: 12.5,
+                  lineHeight: 17,
+                  color: theme.muted,
                 }}
               >
-                {aiBioLoading ? "Generating AI Bio…" : "✨ AI Bio"}
+                Add a short bio so people know who you are.
               </Txt>
-            </PressableScale>
+              <PressableScale
+                onPress={() => router.push("/edit-profile")}
+                accessibilityRole="button"
+                accessibilityLabel="Write a bio"
+                hitSlop={6}
+                scaleTo={0.95}
+              >
+                <Txt
+                  style={{
+                    fontFamily: font.bold,
+                    fontSize: 12.5,
+                    color: theme.accent,
+                  }}
+                >
+                  Write
+                </Txt>
+              </PressableScale>
+              <PressableScale
+                onPress={() => void handleAiBio()}
+                disabled={aiBioLoading}
+                accessibilityRole="button"
+                accessibilityLabel="Draft a bio with AI"
+                hitSlop={6}
+                scaleTo={0.95}
+                style={[
+                  styles.aiBioPill,
+                  { backgroundColor: theme.tints.violet },
+                ]}
+              >
+                <Ionicons name="sparkles" size={12} color={theme.violet} />
+                <Txt
+                  style={{
+                    fontFamily: font.bold,
+                    fontSize: 11.5,
+                    color: theme.toneText.violet,
+                  }}
+                >
+                  {aiBioLoading ? "Drafting…" : "AI draft"}
+                </Txt>
+              </PressableScale>
+            </View>
           ) : null}
-
-          <ProfileIdentity handle={p.handle} userId={p.userId} />
 
           <View
             style={{
@@ -895,115 +963,13 @@ export function ProfileScreen({ handle, inTabs }: Props) {
           />
         </View>
 
-        {/* Customize Your Profile Banner Picker Tray */}
-        {isSelf ? (
-          <View
-            style={[
-              styles.customizeTray,
-              {
-                backgroundColor: theme.surface,
-                borderColor: theme.border,
-              },
-              shadow.card,
-            ]}
-          >
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <Txt
-                style={{
-                  fontFamily: font.heavy,
-                  fontSize: 14,
-                  color: theme.ink,
-                }}
-              >
-                Customize Your Profile
-              </Txt>
-              <Txt
-                style={{
-                  fontFamily: font.regular,
-                  fontSize: 11.5,
-                  color: theme.muted,
-                }}
-              >
-                Choose a theme, banner, and more!
-              </Txt>
-            </View>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ gap: 8, marginTop: 4 }}
-            >
-              {[
-                defaultCover(0),
-                defaultCover(1),
-                defaultCover(2),
-                defaultCover(3),
-                defaultCover(4),
-              ].map((cov, i) => {
-                const selected = selectedBannerIdx === i;
-                return (
-                  <PressableScale
-                    key={i}
-                    onPress={() => {
-                      haptic.tap();
-                      setSelectedBannerIdx(i);
-                    }}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected }}
-                    accessibilityLabel={`Choose banner style ${i + 1}`}
-                    scaleTo={0.95}
-                    style={[
-                      styles.bannerChoiceThumb,
-                      {
-                        borderColor: selected ? theme.accent : theme.border,
-                      },
-                    ]}
-                  >
-                    <Picture
-                      source={cov}
-                      hue={i * 70}
-                      radius={8}
-                      style={{ width: 68, height: 38 }}
-                    />
-                    {selected ? (
-                      <View style={styles.bannerCheckBadge}>
-                        <Ionicons name="checkmark" size={10} color="#FFFFFF" />
-                      </View>
-                    ) : null}
-                  </PressableScale>
-                );
-              })}
-              <PressableScale
-                onPress={() => void changeCover()}
-                accessibilityRole="button"
-                accessibilityLabel="Upload custom banner image"
-                scaleTo={0.95}
-                style={[
-                  styles.bannerAddMoreBtn,
-                  {
-                    backgroundColor: theme.surfaceAlt,
-                    borderColor: theme.border,
-                  },
-                ]}
-              >
-                <Ionicons name="add" size={20} color={theme.accent} />
-              </PressableScale>
-            </ScrollView>
-          </View>
-        ) : null}
-
         {locked ? (
           <View style={{ marginTop: 10 }}>
             <PrivateNotice requested={d.requested} />
           </View>
         ) : (
           <View style={{ gap: 12, marginTop: 6 }}>
-            {/* 5 Profile Tabs: Posts · Collections · Communities · Media · Achievements */}
+            {/* Shortcuts: Posts · Stories & media · Communities · Achievements */}
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -1011,9 +977,8 @@ export function ProfileScreen({ handle, inTabs }: Props) {
             >
               {[
                 { key: "posts", label: "Posts" },
-                { key: "collections", label: "Collections" },
+                { key: "media", label: "Stories & media" },
                 { key: "communities", label: "Communities" },
-                { key: "media", label: "Media" },
                 { key: "achievements", label: "Achievements" },
               ].map((tabItem) => (
                 <PressableScale
@@ -1024,10 +989,7 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                       setCommunitiesOpen(true);
                     } else if (tabItem.key === "achievements") {
                       setAchievementsOpen(true);
-                    } else if (
-                      tabItem.key === "media" ||
-                      tabItem.key === "collections"
-                    ) {
+                    } else if (tabItem.key === "media") {
                       router.push(
                         `/profile-content?userId=${encodeURIComponent(p.userId)}`,
                       );
@@ -1059,11 +1021,17 @@ export function ProfileScreen({ handle, inTabs }: Props) {
               ))}
             </ScrollView>
 
-            {/* Pinned Posts Section */}
+            <ProfileAbout identity={identity.data} isSelf={isSelf} />
+
+            {/* Recent posts */}
             <View style={{ gap: 8, paddingHorizontal: 15 }}>
               <SectionHeader
-                title="Pinned Posts"
-                onAction={() => setPosts({ title: "Pinned Posts" })}
+                title="Recent posts"
+                onAction={
+                  d.recentPosts.length > 0
+                    ? () => setPosts({ title: "Posts" })
+                    : undefined
+                }
                 actionIcon="chevron"
               />
               {d.recentPosts.length > 0 ? (
@@ -1081,7 +1049,6 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                       hue={p.avatarHue + post.id * 17}
                       likes={post.likeCount}
                       comments={post.commentCount}
-                      pinned
                       width={pinnedTileWidth}
                       onPress={() =>
                         router.push(
@@ -1093,297 +1060,19 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                 </View>
               ) : (
                 <EmptyHint
-                  emoji="📌"
-                  title="No pinned posts"
-                  text="Pin your favorite moments to the top of your profile."
+                  emoji="📝"
+                  title="No posts yet"
+                  text={
+                    isSelf
+                      ? "Your posts in communities will show up here."
+                      : `${p.displayName} hasn't posted yet.`
+                  }
                   style={{ marginHorizontal: 0 }}
                 />
               )}
             </View>
 
-            {/* My Top Fandoms Section */}
-            <View style={{ gap: 8, paddingHorizontal: 15 }}>
-              <SectionHeader
-                title="My Top Fandoms"
-                onAction={() => setCommunitiesOpen(true)}
-                actionIcon="chevron"
-              />
-              <View
-                style={[
-                  styles.fandomsGridBox,
-                  {
-                    backgroundColor: theme.surface,
-                    borderColor: theme.border,
-                  },
-                  shadow.card,
-                ]}
-              >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  {[
-                    {
-                      name: "One Piece",
-                      art: heroArt["home-1"] ?? defaultCover(1),
-                    },
-                    {
-                      name: "Genshin Impact",
-                      art: heroArt["home-2"] ?? defaultCover(2),
-                    },
-                    {
-                      name: "Jujutsu Kaisen",
-                      art: heroArt["home-3"] ?? defaultCover(3),
-                    },
-                    {
-                      name: "Solo Leveling",
-                      art: heroArt["explore-1"] ?? defaultCover(4),
-                    },
-                  ].map((fandom) => (
-                    <PressableScale
-                      key={fandom.name}
-                      onPress={() => setCommunitiesOpen(true)}
-                      accessibilityLabel={`Fandom ${fandom.name}`}
-                      scaleTo={0.95}
-                      style={{ alignItems: "center", gap: 4, width: 72 }}
-                    >
-                      <Picture
-                        source={fandom.art}
-                        hue={220}
-                        radius={16}
-                        style={{ width: 62, height: 62 }}
-                      />
-                      <Txt
-                        numberOfLines={1}
-                        style={{
-                          fontFamily: font.bold,
-                          fontSize: 11,
-                          color: theme.ink,
-                          textAlign: "center",
-                        }}
-                      >
-                        {fandom.name}
-                      </Txt>
-                    </PressableScale>
-                  ))}
-                </View>
-              </View>
-            </View>
-
-            {/* Current Streak Milestone Card */}
-            <View style={{ paddingHorizontal: 15 }}>
-              <ShowcaseBanner
-                variant="streak"
-                title={`${streakDays > 0 ? streakDays : 7} Days Current Streak`}
-                text="Keep the fandom spirit going for 7 days! Claim your reward now."
-                onPress={() => setAchievementsOpen(true)}
-              />
-            </View>
-
-            {/* Creator Insights (`getCreatorDashboard` / `platform.creator`) */}
-            <View style={{ gap: 8, paddingHorizontal: 15 }}>
-              <SectionHeader
-                title="Creator Insights"
-                actionLabel="Last 30 days"
-              />
-              <View
-                style={[
-                  styles.insightsBox,
-                  {
-                    backgroundColor: theme.surface,
-                    borderColor: theme.border,
-                  },
-                  shadow.card,
-                ]}
-              >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    justifyContent: "space-between",
-                  }}
-                >
-                  <View style={{ gap: 2 }}>
-                    <Txt
-                      style={{
-                        fontFamily: font.regular,
-                        fontSize: 11.5,
-                        color: theme.muted,
-                      }}
-                    >
-                      Post views
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.heavy,
-                        fontSize: 18,
-                        color: theme.ink,
-                      }}
-                    >
-                      {creatorDashboard.data?.stats?.post_views
-                        ? compactNumber(
-                            Number(creatorDashboard.data.stats.post_views),
-                          )
-                        : "125.4K"}
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.bold,
-                        fontSize: 11,
-                        color: theme.ok,
-                      }}
-                    >
-                      +18% this month
-                    </Txt>
-                  </View>
-                  <View
-                    style={{ width: 1, backgroundColor: theme.border }}
-                  />
-                  <View style={{ gap: 2 }}>
-                    <Txt
-                      style={{
-                        fontFamily: font.regular,
-                        fontSize: 11.5,
-                        color: theme.muted,
-                      }}
-                    >
-                      Profile visits
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.heavy,
-                        fontSize: 18,
-                        color: theme.ink,
-                      }}
-                    >
-                      {creatorDashboard.data?.stats?.profile_visits
-                        ? compactNumber(
-                            Number(creatorDashboard.data.stats.profile_visits),
-                          )
-                        : "4.2K"}
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.bold,
-                        fontSize: 11,
-                        color: theme.ok,
-                      }}
-                    >
-                      +24% this month
-                    </Txt>
-                  </View>
-                  <View
-                    style={{ width: 1, backgroundColor: theme.border }}
-                  />
-                  <View style={{ gap: 2 }}>
-                    <Txt
-                      style={{
-                        fontFamily: font.regular,
-                        fontSize: 11.5,
-                        color: theme.muted,
-                      }}
-                    >
-                      New followers
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.heavy,
-                        fontSize: 18,
-                        color: theme.ink,
-                      }}
-                    >
-                      {creatorDashboard.data?.stats?.new_followers
-                        ? compactNumber(
-                            Number(creatorDashboard.data.stats.new_followers),
-                          )
-                        : "1.8K"}
-                    </Txt>
-                    <Txt
-                      style={{
-                        fontFamily: font.bold,
-                        fontSize: 11,
-                        color: theme.ok,
-                      }}
-                    >
-                      +36% this month
-                    </Txt>
-                  </View>
-                </View>
-              </View>
-            </View>
-
-            {/* Support My Work Tip Tier Card */}
-            <View style={{ paddingHorizontal: 15 }}>
-              <LinearGradient
-                colors={
-                  theme.dark
-                    ? ["#2A173B", "#1B1534"]
-                    : ["#FCE7F3", "#F5F3FF"]
-                }
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={[
-                  styles.supportWorkCard,
-                  { borderColor: theme.border },
-                  shadow.card,
-                ]}
-              >
-                <View
-                  style={{
-                    flexDirection: "row",
-                    alignItems: "center",
-                    gap: 8,
-                  }}
-                >
-                  <Ionicons name="heart" size={18} color={theme.pink} />
-                  <Txt
-                    style={{
-                      fontFamily: font.heavy,
-                      fontSize: 15,
-                      color: theme.ink,
-                    }}
-                  >
-                    Support My Work
-                  </Txt>
-                </View>
-                <Txt
-                  style={{
-                    fontFamily: font.regular,
-                    fontSize: 12.5,
-                    lineHeight: 18,
-                    color: theme.muted,
-                  }}
-                >
-                  Help me create more content, get early access, and unlock
-                  exclusive supporter perks!
-                </Txt>
-                <GradientButton
-                  label="Become a Supporter"
-                  gradient="primary"
-                  size="md"
-                  full
-                  onPress={() => setSupporterSheetOpen(true)}
-                  style={{ marginTop: 2 }}
-                />
-              </LinearGradient>
-            </View>
-
-            {/* Badges & Achievements Row */}
-            <View style={{ paddingHorizontal: 15 }}>
-              <BadgeRow
-                badges={d.badges}
-                onSeeAll={() => setAchievementsOpen(true)}
-                emptyText={
-                  isSelf
-                    ? "Post, chat and play to earn badges."
-                    : "No badges yet."
-                }
-              />
-            </View>
-
-            {/* Communities Row */}
+            {/* Communities */}
             {d.communities.length > 0 ? (
               <View style={{ gap: 8, paddingHorizontal: 15 }}>
                 <SectionHeader
@@ -1408,6 +1097,89 @@ export function ProfileScreen({ handle, inTabs }: Props) {
                     />
                   ))}
                 </ScrollView>
+              </View>
+            ) : null}
+
+            {/* Check-in streak (only when there is one) */}
+            {streakDays > 0 ? (
+              <View style={{ paddingHorizontal: 15 }}>
+                <ShowcaseBanner
+                  variant="streak"
+                  title={`${streakDays}-day check-in streak`}
+                  text={
+                    isSelf
+                      ? `Best so far: ${Math.max(d.streak.best, streakDays)} days. Check in on Home each day to keep it going.`
+                      : `Best so far: ${Math.max(d.streak.best, streakDays)} days.`
+                  }
+                  onPress={() => setAchievementsOpen(true)}
+                />
+              </View>
+            ) : null}
+
+            {/* Badges & Achievements Row */}
+            <View style={{ paddingHorizontal: 15 }}>
+              <BadgeRow
+                badges={d.badges}
+                onSeeAll={() => setAchievementsOpen(true)}
+                emptyText={
+                  isSelf
+                    ? "Post, chat and play to earn badges."
+                    : "No badges yet."
+                }
+              />
+            </View>
+
+            {/* Your numbers (own profile only, real totals from the creator dashboard) */}
+            {isSelf && creatorStats ? (
+              <View style={{ gap: 8, paddingHorizontal: 15 }}>
+                <SectionHeader
+                  title="Your numbers"
+                  actionLabel="Creator studio"
+                  actionIcon="chevron"
+                  onAction={() => router.push("/tools?tab=creator" as never)}
+                />
+                <View
+                  style={[
+                    styles.insightsBox,
+                    {
+                      backgroundColor: theme.surface,
+                      borderColor: theme.border,
+                    },
+                    shadow.card,
+                  ]}
+                >
+                  {creatorStats.map((stat, i) => (
+                    <View
+                      key={stat.label}
+                      style={{
+                        flex: 1,
+                        gap: 2,
+                        alignItems: "center",
+                        borderLeftWidth: i === 0 ? 0 : 1,
+                        borderLeftColor: theme.border,
+                      }}
+                    >
+                      <Txt
+                        style={{
+                          fontFamily: font.heavy,
+                          fontSize: 18,
+                          color: theme.ink,
+                        }}
+                      >
+                        {compactNumber(stat.value)}
+                      </Txt>
+                      <Txt
+                        style={{
+                          fontFamily: font.regular,
+                          fontSize: 11.5,
+                          color: theme.muted,
+                        }}
+                      >
+                        {stat.label}
+                      </Txt>
+                    </View>
+                  ))}
+                </View>
               </View>
             ) : null}
 
@@ -1471,71 +1243,6 @@ export function ProfileScreen({ handle, inTabs }: Props) {
         communities={d.communities.filter((c) => c.joined)}
       />
 
-      {/* Support My Work Tip Sheet */}
-      <Sheet
-        visible={supporterSheetOpen}
-        title={`Support ${p.displayName} 💖`}
-        onClose={() => setSupporterSheetOpen(false)}
-      >
-        <Txt
-          style={{
-            fontFamily: font.regular,
-            fontSize: 13.5,
-            lineHeight: 19,
-            color: theme.muted,
-          }}
-        >
-          Choose a supporter tier to unlock the Supporter Badge on your profile
-          and support {p.displayName}’s work:
-        </Txt>
-        {[
-          { label: "☕ Coffee Tip · 100 Coins", perks: "Supporter shoutout + +25 Rep" },
-          { label: "🌟 Super Fan Tier · 500 Coins", perks: "Exclusive Supporter Badge + early posts" },
-          { label: "👑 Patron Legend · 1,200 Coins", perks: "Custom profile title + VIP live room stage access" },
-        ].map((tier) => (
-          <PressableScale
-            key={tier.label}
-            onPress={() => {
-              haptic.success();
-              setSupporterSheetOpen(false);
-              notify(
-                "Thank You for Supporting! 💖",
-                `Your contribution to ${p.displayName} has been sent.`,
-              );
-            }}
-            accessibilityRole="button"
-            accessibilityLabel={tier.label}
-            scaleTo={0.98}
-            style={{
-              padding: 12,
-              borderRadius: radius.card,
-              backgroundColor: theme.surfaceAlt,
-              borderWidth: 1,
-              borderColor: theme.border,
-              gap: 2,
-            }}
-          >
-            <Txt
-              style={{
-                fontFamily: font.heavy,
-                fontSize: 14,
-                color: theme.ink,
-              }}
-            >
-              {tier.label}
-            </Txt>
-            <Txt
-              style={{
-                fontFamily: font.regular,
-                fontSize: 12,
-                color: theme.muted,
-              }}
-            >
-              {tier.perks}
-            </Txt>
-          </PressableScale>
-        ))}
-      </Sheet>
     </View>
   );
 }
@@ -1884,44 +1591,20 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 5,
-    alignSelf: "flex-start",
-    marginTop: 6,
     height: 26,
     paddingHorizontal: 10,
     borderRadius: radius.pill,
   },
-  customizeTray: {
-    marginHorizontal: 15,
+  addBio: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
     marginTop: 10,
-    padding: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     borderRadius: radius.card,
     borderWidth: 1,
-    gap: 8,
-  },
-  bannerChoiceThumb: {
-    borderRadius: 8,
-    borderWidth: 2,
-    overflow: "hidden",
-  },
-  bannerCheckBadge: {
-    position: "absolute",
-    right: 4,
-    top: 4,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: "#7C3AED",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  bannerAddMoreBtn: {
-    width: 42,
-    height: 38,
-    borderRadius: 8,
-    borderWidth: 1,
     borderStyle: "dashed",
-    alignItems: "center",
-    justifyContent: "center",
   },
   profileTabPill: {
     height: 32,
@@ -1931,20 +1614,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  fandomsGridBox: {
-    padding: 12,
-    borderRadius: radius.card,
-    borderWidth: 1,
-  },
   insightsBox: {
-    padding: 14,
+    flexDirection: "row",
+    paddingVertical: 14,
+    paddingHorizontal: 6,
     borderRadius: radius.card,
     borderWidth: 1,
-  },
-  supportWorkCard: {
-    padding: 14,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    gap: 8,
   },
 });

@@ -6,9 +6,9 @@ import { api } from "@/api/endpoints";
 import type { FeedPost, HomeOverview } from "@/api/models";
 import type { CommunityCardData, FeedTab } from "@/api/types";
 import { PostCard } from "@/components/PostCard";
-import {HomeToolsStrip} from '@/components/HomeToolsStrip';
 import { TutorialPrompt } from '@/components/TutorialPrompt';
 import { afterCheckIn } from "@/components/home/homeData";
+import { JumpBackIn } from "@/components/home/JumpBackIn";
 import { CommunityRow, CreatorRow, HomeHero, HomeSection, HomeSkeleton, StreakAndEvent } from "@/components/home/HomeSections";
 import { AppHeader, CategoryChips, SectionHeader, TabsUnderline } from "@/components/k";
 import { EmptyState, ErrorState, Loading, SkeletonList, useTabBarSpace } from "@/components/ui";
@@ -17,8 +17,9 @@ import { haptic } from "@/lib/haptics";
 
 /**
  * Home (mockup 03-home): header, hero banners, category chips (they filter the cards below), Recommended and
- * Trending communities, Daily Streak + Live Event, Featured Creators, then "Your feed" with three tabs
- * (For You / Following / Communities) that loads more posts as you scroll.
+ * Trending communities, Daily Streak + Live Event, "Jump back in" shortcuts, Featured Creators, then "Your feed"
+ * (with a "Feed controls" link) and three tabs (For You / Following / Communities) that load more posts as you scroll.
+ * Saved and Creator studio live in the Profile menu.
  */
 
 const FEED_TABS: { key: FeedTab; label: string; icon: "sparkles-outline" | "people-outline" | "planet-outline" }[] = [
@@ -152,7 +153,6 @@ export default function Home() {
   const header = (
     <View style={{ gap: 10, paddingBottom: 12 }}>
       <AppHeader onLogoPress={() => list.current?.scrollToOffset({ offset: 0, animated: true })} />
-      <HomeToolsStrip/>
       <TutorialPrompt />
       {data ? (
         <>
@@ -177,6 +177,7 @@ export default function Home() {
             </HomeSection>
           ) : null}
           <StreakAndEvent streak={data.streak} event={data.liveEvent} checkingIn={busy === "checkin"} onCheckIn={() => void checkIn()} rsvpBusy={busy === "rsvp"} onRsvp={() => void rsvp()} />
+          <JumpBackIn />
           {data.featuredCreators.length ? (
             <HomeSection emoji="⭐" title="Featured Creators" onSeeAll={() => router.push("/explore?search=1")}>
               <CreatorRow creators={data.featuredCreators} busy={busy} onFollow={(id) => void toggleFollow(id)} />
@@ -191,7 +192,7 @@ export default function Home() {
 
       <View style={{ gap: 6, marginTop: 6 }}>
         <View style={{ paddingHorizontal: 16 }}>
-          <SectionHeader emoji="💜" title="Your feed" />
+          <SectionHeader emoji="💜" title="Your feed" actionLabel="Feed controls" actionIcon="chevron" onAction={() => router.push("/tools?tab=discovery" as never)} />
         </View>
         <TabsUnderline tabs={FEED_TABS} value={tab} onChange={(k) => setTab(k as FeedTab)} style={{ marginHorizontal: 16 }} />
       </View>

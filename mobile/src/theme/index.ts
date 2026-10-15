@@ -32,6 +32,8 @@ export type Theme = {
   surface: string;
   /** Inputs, inactive chips, picture placeholders. */
   surfaceAlt: string;
+  /** Faint violet fill behind AI features (AI cards, AI replies). */
+  surfaceAi: string;
   /** Old name for a raised surface; same as `surfaceAlt` now. */
   elevated: string;
   /** Headings and names. */
@@ -90,6 +92,8 @@ export type Theme = {
   gradWarm: Gradient;
   /** Secondary highlights (white text reads on it). */
   gradCool: Gradient;
+  /** Soft background of AI cards ("Discover with AI"); put `ink` text on it. */
+  gradAiCard: Gradient;
 
   // ── Kept for older screens ──
   /** Card fill. Was see-through glass; now the solid card colour. */
@@ -113,6 +117,7 @@ const light: Theme = {
   bg: "#F8F7FC",
   surface: "#FFFFFF",
   surfaceAlt: "#F4F2FA",
+  surfaceAi: "#F7F3FF",
   elevated: "#F4F2FA",
   ink: "#0F0B2A",
   text: "#2A2640",
@@ -144,6 +149,7 @@ const light: Theme = {
   gradTopCreator: ["#8B4DFB", "#C44DF0"],
   gradWarm: ["#E11D48", "#C2410C"],
   gradCool: ["#0891B2", "#7C3AED"],
+  gradAiCard: ["#F5F0FF", "#FDF2FA"],
   glass: "#FFFFFF",
   glassStrong: "#FFFFFF",
   glassEdge: "rgba(255,255,255,0)",
@@ -158,6 +164,7 @@ const dark: Theme = {
   bg: "#0E0B1F",
   surface: "#17132E",
   surfaceAlt: "#211C3D",
+  surfaceAi: "#241C45",
   elevated: "#211C3D",
   ink: "#F5F3FF",
   text: "#DCD8F0",
@@ -189,6 +196,7 @@ const dark: Theme = {
   gradTopCreator: ["#8B4DFB", "#C44DF0"],
   gradWarm: ["#E11D48", "#C2410C"],
   gradCool: ["#0891B2", "#7C3AED"],
+  gradAiCard: ["#2A1F52", "#1E1A3D"],
   glass: "#17132E",
   glassStrong: "#17132E",
   glassEdge: "rgba(255,255,255,0.06)",

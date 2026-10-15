@@ -30,6 +30,7 @@ import {
   type SearchFilters,
 } from "@/components/community/helpers";
 import { serverImage } from "@/components/community/media";
+import { YourCommunities } from "@/components/community/YourCommunities";
 import { notify } from "@/components/community/platform";
 import {
   AppHeader,
@@ -251,6 +252,13 @@ export default function Explore() {
     queryKey: ["exploreOverview", categoryKey ?? "forYou"],
     queryFn: () => api.exploreOverview(categoryKey),
     placeholderData: keepPreviousData,
+  });
+
+  // Your own communities never depend on the mood filter, so they come from the unfiltered overview
+  // (same cache entry as `overview` when no mood is picked, so this costs no extra request).
+  const mine = useQuery({
+    queryKey: ["exploreOverview", "forYou"],
+    queryFn: () => api.exploreOverview(undefined),
   });
 
   // 2. Home Overview (Featured Creators, Live Event, Heroes)
@@ -580,6 +588,7 @@ export default function Explore() {
         avatarHue: entry.hue,
         avatarV: entry.avatarV,
         verified: entry.role === "leader" || entry.role === "agent",
+        creator: false,
         headline: `${compactNumber(entry.rep)} rep`,
         followers: entry.weekLikes,
         following: false,
@@ -647,7 +656,7 @@ export default function Explore() {
         title: String(row.title ?? "Community Fan Event"),
         startsAt: String(row.starts_at ?? new Date().toISOString()),
         location: String(row.location || row.community_name || "Online"),
-        interested: Number(row.rsvp_count ?? 120),
+        interested: Number(row.rsvp_count ?? 0),
         going: false,
         hue: (idx * 65 + 280) % 360,
         cover: null,
@@ -676,6 +685,7 @@ export default function Explore() {
             }
             onRefresh={() => {
               void overview.refetch();
+              void mine.refetch();
               void homeOverview.refetch();
               void hub.refetch();
               if (primarySlug) {
@@ -855,7 +865,21 @@ export default function Explore() {
           </View>
         ) : (
           <>
-            {/* 5 Filter Tabs: Trending · Fandoms · Creators · Events · AI Picks */}
+            {/* Your communities come first: this is the Communities tab. */}
+            <View style={{ marginTop: 14 }}>
+              <YourCommunities
+                communities={mine.data?.joined ?? []}
+                loading={mine.isPending}
+                onBrowse={() => browseAll("trending")}
+              />
+            </View>
+
+            <SectionHeader
+              title="Discover"
+              style={{ paddingHorizontal: 16, marginTop: 18 }}
+            />
+
+            {/* Filter Tabs: Trending · Fandoms · Creators · Events · AI Picks */}
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
@@ -1426,10 +1450,10 @@ export default function Explore() {
                         const validDate = !Number.isNaN(dt.getTime());
                         const monthStr = validDate
                           ? MONTHS_SHORT[dt.getMonth()]!
-                          : "OCT";
+                          : "";
                         const dayStr = validDate
                           ? String(dt.getDate()).padStart(2, "0")
-                          : "15";
+                          : "";
                         const rsvpBusy = busyKey === `rsvp:${ev.id}`;
                         return (
                           <PressableScale
@@ -1440,7 +1464,7 @@ export default function Explore() {
                               }
                             }}
                             accessibilityRole="button"
-                            accessibilityLabel={`${ev.title}, ${ev.location}, ${compactNumber(ev.interested)} interested`}
+                            accessibilityLabel={`${ev.title}, ${ev.location}${ev.interested > 0 ? `, ${compactNumber(ev.interested)} interested` : ""}`}
                             scaleTo={0.97}
                             style={[
                               styles.fanEventCard,
@@ -1461,6 +1485,7 @@ export default function Explore() {
                               radius={12}
                               style={styles.fanEventThumb}
                             >
+                              {validDate ? (
                               <View
                                 style={[
                                   styles.dateBadge,
@@ -1488,6 +1513,7 @@ export default function Explore() {
                                   {dayStr}
                                 </Txt>
                               </View>
+                              ) : null}
                             </Picture>
 
                             <View style={{ flex: 1, gap: 3 }}>
@@ -1521,6 +1547,7 @@ export default function Explore() {
                                   {ev.location}
                                 </Txt>
                               </View>
+                              {ev.interested > 0 ? (
                               <View style={styles.eventMetaRow}>
                                 <Ionicons
                                   name="people-outline"
@@ -1538,6 +1565,7 @@ export default function Explore() {
                                   {compactNumber(ev.interested)} interested
                                 </Txt>
                               </View>
+                              ) : null}
                             </View>
 
                             <PressableScale
