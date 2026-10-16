@@ -13,6 +13,14 @@ const LEGACY_DEVICE_TOKEN_KEY = "kamino.fcm-token";
 const SESSION_TOKEN_KEY = "kamino.session-token";
 const BACKGROUND_PUSH_TASK = "KAMINO_BACKGROUND_PUSH_TASK";
 
+/**
+ * Tracks notification IDs already presented in this session to prevent duplicates.
+ * The system notification and the app's background handler can both fire for the same
+ * push — this ensures the user only sees one notification per event.
+ */
+const presentedNotificationIds = new Set<string>();
+const MAX_TRACKED_IDS = 100;
+
 export type PushPlatform = "ios" | "android";
 export type PushRegistrationStatus = "enabled" | "denied" | "unsupported";
 
@@ -77,6 +85,20 @@ function toNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * Rejects strings that look like stringified JSON payloads (e.g. '{"href":"/chats/15",...}').
+ * These leak into notification title/body when FCM delivers a data payload that the system
+ * tries to display directly. Never show raw JSON to the user — fall back to human-readable text.
+ */
+function toDisplayString(value: unknown): string | null {
+  const s = toNonEmptyString(value);
+  if (!s) return null;
+  const t = s.trim();
+  // JSON objects/arrays start with { or [ — never valid notification text
+  if (t.startsWith("{") || t.startsWith("[")) return null;
+  return s;
 }
 
 /**
@@ -312,6 +334,20 @@ export async function presentDataPayloadNotification(
   raw: Record<string, unknown>,
 ): Promise<void> {
   if (Platform.OS === "web") return;
+
+  // Deduplicate: if we've already shown a notification for this ID, skip it.
+  // The system and the background handler can both fire for the same push.
+  const notifId = raw.notificationId != null ? String(raw.notificationId) : null;
+  if (notifId) {
+    if (presentedNotificationIds.has(notifId)) return;
+    presentedNotificationIds.add(notifId);
+    // Prevent unbounded growth
+    if (presentedNotificationIds.size > MAX_TRACKED_IDS) {
+      const first = presentedNotificationIds.values().next().value;
+      if (first) presentedNotificationIds.delete(first);
+    }
+  }
+
   const target = extractNotificationTarget(raw);
 
   if (target.isCallEnded) {
@@ -320,11 +356,11 @@ export async function presentDataPayloadNotification(
   }
 
   const title =
-    toNonEmptyString(raw.title) ??
-    (toNonEmptyString(raw.callerName)
-      ? `${toNonEmptyString(raw.callerName)} is calling…`
+    toDisplayString(raw.title) ??
+    (toDisplayString(raw.callerName)
+      ? `${toDisplayString(raw.callerName)} is calling…`
       : null) ??
-    toNonEmptyString(raw.senderName) ??
+    toDisplayString(raw.senderName) ??
     (target.isCall
       ? "Incoming Kamino Call"
       : target.isEventOrLive
@@ -332,9 +368,9 @@ export async function presentDataPayloadNotification(
         : null);
 
   const body =
-    toNonEmptyString(raw.body) ??
-    toNonEmptyString(raw.text) ??
-    toNonEmptyString(raw.message) ??
+    toDisplayString(raw.body) ??
+    toDisplayString(raw.text) ??
+    toDisplayString(raw.message) ??
     (target.isCall
       ? "Tap Answer to join the voice or video call"
       : target.isEventOrLive
