@@ -8,7 +8,7 @@ import type { CommunityCardData, FeedTab } from "@/api/types";
 import { PostCard } from "@/components/PostCard";
 import { TutorialPrompt } from '@/components/TutorialPrompt';
 import { afterCheckIn } from "@/components/home/homeData";
-import { JumpBackIn } from "@/components/home/JumpBackIn";
+import { HomeTools, JumpBackIn } from "@/components/home/JumpBackIn";
 import { CommunityRow, CreatorRow, HomeHero, HomeSection, HomeSkeleton, StreakAndEvent } from "@/components/home/HomeSections";
 import { AppHeader, CategoryChips, SectionHeader, TabsUnderline } from "@/components/k";
 import { EmptyState, ErrorState, Loading, SkeletonList, useTabBarSpace } from "@/components/ui";
@@ -207,7 +207,14 @@ export default function Home() {
         void feed.refetch();
         void queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
       }}
-      ListFooterComponent={feed.isFetchingNextPage ? <Loading label="Loading more posts…" /> : null}
+      ListFooterComponent={
+        feed.isFetchingNextPage ? (
+          <Loading label="Loading more posts…" />
+        ) : feed.isPending || feed.hasNextPage ? null : (
+          // End of Home: "all caught up" and the tools tiles, like the website.
+          <HomeTools caughtUp={uniquePosts.length > 0} />
+        )
+      }
       ListEmptyComponent={
         <View style={{ paddingHorizontal: 16 }}>
           {feed.isPending ? (

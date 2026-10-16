@@ -1,4 +1,5 @@
 import { Ionicons } from "@expo/vector-icons";
+import { useState } from "react";
 import { ActivityIndicator, StyleSheet, TextInput, View, type StyleProp, type ViewStyle } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { font, radius, useTheme, withAlpha } from "@/theme";
@@ -272,12 +273,16 @@ export function CommentBar({ me, value, onChangeText, onSend, sending, onPickIma
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const canSend = !!value.trim() && !sending && !disabled;
+  const [focused, setFocused] = useState(false);
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingTop: 7, paddingBottom: 7 + (safeArea ? insets.bottom : 0), backgroundColor: theme.surface, borderTopWidth: 1, borderTopColor: theme.border }}>
       {me ? <PersonAvatar person={me} size={30} /> : null}
-      <View style={{ flex: 1, flexDirection: "row", alignItems: "center", backgroundColor: theme.surfaceAlt, borderRadius: radius.pill, paddingLeft: 14, paddingRight: 4, minHeight: 38 }}>
+      <View style={{ flex: 1, flexDirection: "row", alignItems: "center", backgroundColor: focused ? theme.surface : theme.surfaceAlt, borderWidth: 1, borderColor: focused ? withAlpha(theme.violet, 0.35) : "transparent", borderRadius: radius.pill, paddingLeft: 14, paddingRight: 4, minHeight: 38 }}>
         <TextInput
           value={value}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          underlineColorAndroid="transparent"
           onChangeText={onChangeText}
           placeholder={placeholder}
           placeholderTextColor={theme.subtle}

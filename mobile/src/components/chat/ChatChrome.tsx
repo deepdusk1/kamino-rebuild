@@ -1,11 +1,11 @@
 import { Ionicons } from "@expo/vector-icons";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ActivityIndicator, TextInput, View } from "react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withDelay, withRepeat, withSequence, withTiming } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { IconButton, PersonAvatar, VerifiedTick, type IconName, type Person } from "@/components/k";
 import { PressableScale, Txt } from "@/components/ui";
-import { font, radius, shadow, useTheme } from "@/theme";
+import { font, radius, shadow, useTheme, withAlpha } from "@/theme";
 
 /**
  * The frame of a chat room in the new look: the header (back, face, name, status, actions), the input bar (styled
@@ -77,6 +77,8 @@ type ChatInputBarProps = {
 
 /** The sticky message bar: ＋ attach, a rounded input with sticker and camera buttons, and a violet send / mic circle. */
 export function ChatInputBar({ value, onChangeText, onSend, onRecord, recording, onAttach, onSticker, onCamera, sending, editing, placeholder = "Message…", top }: ChatInputBarProps) {
+  // Typing shows a soft violet edge (no hard box), same as the website.
+  const [focused, setFocused] = useState(false);
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const hasText = !!value.trim();
@@ -98,9 +100,12 @@ export function ChatInputBar({ value, onChangeText, onSend, onRecord, recording,
                 <Ionicons name="add-circle" size={30} color={theme.violet} />
               </PressableScale>
             ) : null}
-            <View style={{ flex: 1, flexDirection: "row", alignItems: "flex-end", backgroundColor: theme.surfaceAlt, borderRadius: 20, paddingLeft: 14, paddingRight: 4, minHeight: 40 }}>
+            <View style={{ flex: 1, flexDirection: "row", alignItems: "flex-end", backgroundColor: focused ? theme.surface : theme.surfaceAlt, borderWidth: 1, borderColor: focused ? withAlpha(theme.violet, 0.35) : "transparent", borderRadius: 20, paddingLeft: 14, paddingRight: 4, minHeight: 40 }}>
               <TextInput
                 value={value}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                underlineColorAndroid="transparent"
                 onChangeText={onChangeText}
                 placeholder={placeholder}
                 placeholderTextColor={theme.subtle}
