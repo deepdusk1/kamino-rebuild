@@ -82,6 +82,7 @@ export async function rewindTo(sql: Sql, sceneId: number, turnId: number): Promi
     where scene_id = ${sceneId} and id > ${turnId} and rewound_at is null
     returning id`;
   await sql`delete from story_branch_options where scene_id = ${sceneId} and after_turn_id > ${turnId}`;
-  await sql`update roleplay_scenes set updated_at = now() where id = ${sceneId}`;
+  // The storyteller's notes may describe the hidden part, so they start fresh from the checkpoint.
+  await sql`update roleplay_scenes set updated_at = now(), notes = '', spotlight = '' where id = ${sceneId}`;
   return hidden.length;
 }

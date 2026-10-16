@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { BRANCH_COUNT, branchPrompt, checkScene, cleanReply, draftPrompt, endingPrompt, narrationPrompt, parseBranches, parseDraft, recentStory, storytellerRules } from "./roleplay.ts";
+import { BRANCH_COUNT, CLICHES, NOTES_MARKER, STORY_TONES, branchPrompt, checkScene, checkTone, cleanReply, craftRules, draftPrompt, endingPrompt, movesSinceNarrator, narrationPrompt, outcomeFor, parseBranches, parseDraft, pickSpotlight, recentStory, splitNotes, storyPhase, storytellerRules } from "./roleplay.ts";
 
 const scene = {
   title: "The ship that made it",
@@ -40,7 +40,7 @@ test("narration leaves member-played characters to their players and voices the 
   const user = messages[1]!.content;
   assert.match(user, /Rose: A restless young traveller \(played by a member; never write/);
   assert.match(user, /Captain: Proud and tired \(not taken; you voice/);
-  assert.match(user, /Rose: I run to the deck\./);
+  assert.match(user, /What the players just did[\s\S]*- Rose: I run to the deck\.\n {2}Outcome: /);
   assert.match(user, /A player suggests this should happen next: a storm/);
   assert.match(narrationPrompt(scene, [], [])[1]!.content, /Write the opening scene/);
 });
@@ -90,4 +90,103 @@ test("the branch prompt asks for exactly the number of options the server stores
   assert.equal(messages[0]!.role, "system");
   assert.match(messages[1]!.content, new RegExp(`exactly ${BRANCH_COUNT} different directions`));
   assert.match(messages[1]!.content, /The ship docks\./);
+});
+
+const cast2 = [{ name: "Rose", player: "u1" }, { name: "Jack", player: "u2" }];
+const scene2 = { ...scene, characters: [...scene.characters, { name: "Jack", description: "A gambler with a ticket he didn't win fairly" }] };
+
+test("the storyteller answers every new move, each with a fixed outcome, and the story text doesn't repeat them", () => {
+  const turns = [
+    { kind: "narration" as const, character: "", body: "The ballroom lights flicker." },
+    { kind: "turn" as const, character: "Rose", body: "I grab the captain's logbook." },
+    { kind: "turn" as const, character: "Jack", body: "I bet my ticket that the ship turns back." },
+  ];
+  assert.deepEqual(movesSinceNarrator(turns).map((t) => t.character), ["Rose", "Jack"]);
+  const user = narrationPrompt(scene2, cast2, turns)[1]!.content;
+  assert.match(user, /The ballroom lights flicker\./);
+  assert.equal(user.split("I grab the captain's logbook.").length, 2, "each move appears once");
+  assert.match(user, /- Rose: I grab the captain's logbook\.\n {2}Outcome: (it works|it does not go)/);
+  assert.match(user, /- Jack: I bet my ticket that the ship turns back\.\n {2}Outcome: /);
+  assert.match(user, /about 70 words per player move/);
+  assert.match(user, new RegExp(`write \\[\\[NOTES\\]\\]`));
+});
+
+test("outcomes are stable for the same move and mixed across moves", () => {
+  assert.equal(outcomeFor("Rose|I open the door"), outcomeFor("Rose|I open the door"));
+  const seen = new Set(Array.from({ length: 200 }, (_, i) => outcomeFor(`Rose|move ${i}`)));
+  assert.deepEqual([...seen].sort(), ["clean", "cost", "setback"]);
+  const counts = { clean: 0, cost: 0, setback: 0 };
+  for (let i = 0; i < 2000; i += 1) counts[outcomeFor(`Jack|try ${i}`)] += 1;
+  assert.ok(counts.clean > 800 && counts.clean < 1200, `about half succeed cleanly (${counts.clean})`);
+  assert.ok(counts.setback > 150 && counts.setback < 450, `some go wrong (${counts.setback})`);
+});
+
+test("the spotlight goes to the player who has waited longest, never to whoever just moved", () => {
+  const turns = [
+    { kind: "turn" as const, character: "Rose", body: "a" },
+    { kind: "turn" as const, character: "Jack", body: "b" },
+    { kind: "narration" as const, character: "", body: "c" },
+    { kind: "turn" as const, character: "Rose", body: "d" },
+  ];
+  assert.equal(pickSpotlight(scene2.characters, cast2, turns), "Jack");
+  assert.equal(pickSpotlight(scene2.characters, cast2, [{ kind: "turn", character: "Jack", body: "x" }]), "Rose", "someone who never played comes first");
+  assert.equal(pickSpotlight(scene2.characters, [{ name: "Rose", player: "u1" }], turns), "Rose", "a solo player is always the one asked");
+  assert.equal(pickSpotlight(scene2.characters, [], turns), null);
+  assert.match(narrationPrompt(scene2, cast2, turns)[1]!.content, /End by putting Jack on the spot/);
+});
+
+test("notes are split off the narration and never shown; a missing marker keeps everything as story", () => {
+  assert.deepEqual(splitNotes(`The door creaks open.\n${NOTES_MARKER}\nNPC: Mara the cook. Open: who took the key?`), {
+    story: "The door creaks open.",
+    notes: "NPC: Mara the cook. Open: who took the key?",
+  });
+  assert.deepEqual(splitNotes("Rain.\n\nStory notes: the clock is wrong"), { story: "Rain.", notes: "the clock is wrong" });
+  assert.deepEqual(splitNotes("Just a story."), { story: "Just a story.", notes: "" });
+});
+
+test("tone, notes, opening and pacing reach the storyteller", () => {
+  const turns = Array.from({ length: 80 }, (_, i) => ({ kind: "turn" as const, character: "Rose", body: `step ${i} ${"y".repeat(60)}` }));
+  const user = narrationPrompt({ ...scene, tone: "mystery", notes: "Mara hid the key.", opening: "Fog swallows the pier at dawn.", progress: 40 }, cast2, [{ kind: "narration", character: "", body: "Fog swallows the pier at dawn." }, ...turns, { kind: "narration", character: "", body: "x" }])[1]!.content;
+  assert.match(user, /Mood: Mystery\. Plant real clues/);
+  assert.match(user, /Story notes[^\n]*\nMara hid the key\./);
+  assert.match(user, /How the story began: Fog swallows the pier at dawn\./);
+  assert.match(user, /drive toward a climax/);
+  assert.equal(checkTone("horror"), "horror");
+  assert.equal(checkTone("explicit"), "");
+  assert.equal(checkScene({ ...scene, tone: "comedy" }).tone, "comedy");
+  assert.equal(checkScene({ ...scene, tone: "nope" }).tone, "");
+  assert.match(storyPhase(0), /opening/);
+  assert.match(storyPhase(3), /Early on/);
+  assert.match(storyPhase(20), /Twist time/);
+  assert.match(storyPhase(14), /Middle/);
+  assert.equal(Object.keys(STORY_TONES).length, 6);
+});
+
+test("craft rules ban stock phrases and writing for member-played characters", () => {
+  const rules = craftRules();
+  for (const phrase of CLICHES) assert.ok(rules.includes(`"${phrase}"`));
+  assert.match(rules, /Never write actions, words, thoughts or feelings for characters that members play/);
+  assert.match(rules, /React first/);
+  const sys = narrationPrompt(scene, [], [])[0]!.content;
+  assert.match(sys, /18\+/);
+  assert.match(sys, /How you narrate/);
+});
+
+test("set-ups ask for wants, secrets, clashes and an opening that starts mid-action", () => {
+  const user = draftPrompt("Harry Potter", "Neville is chosen", "horror")[1]!.content;
+  assert.match(user, /Mood: Horror/);
+  assert.match(user, /secret or flaw/);
+  assert.match(user, /reason to clash/);
+  assert.match(user, /Start in the middle of the incident/);
+  assert.match(user, /JSON only/);
+  assert.doesNotMatch(draftPrompt("", "a heist")[1]!.content, /Mood:/);
+});
+
+test("endings pay off each player's choices and options are grounded in the story", () => {
+  const ending = endingPrompt(scene2, cast2, [], "they escape")[1]!.content;
+  assert.match(ending, /Give each player's character \(Rose, Jack\) a meaningful final moment/);
+  assert.match(ending, /Call back to at least two specific earlier details/);
+  const branches = branchPrompt(scene2, cast2, [])[1]!.content;
+  assert.match(branches, /name a specific character, place or object/);
+  assert.match(branches, /one cautious, one risky, one surprising twist/);
 });

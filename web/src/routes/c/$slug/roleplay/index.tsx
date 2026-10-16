@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { createScene, draftScene, getAiStatus, listScenes } from "@/lib/kamino/ai-features";
 import { HELD_MESSAGE } from "@/lib/kamino/held";
+import { STORY_TONES, type StoryTone } from "@/lib/kamino/roleplay";
 import { getCommunityPage } from "@/lib/kamino/server";
 import { cn, timeAgo } from "@/lib/utils";
 
@@ -43,12 +44,13 @@ function Stories() {
   const [characters, setCharacters] = useState<CharacterDraft[]>([{ name: "", description: "" }]);
   const [opening, setOpening] = useState("");
   const [playAs, setPlayAs] = useState("");
+  const [tone, setTone] = useState<StoryTone | "">("");
   const [busy, setBusy] = useState<"draft" | "create" | null>(null);
 
   async function draft() {
     setBusy("draft");
     try {
-      const d = await draftScene({ data: { slug, source, idea } });
+      const d = await draftScene({ data: { slug, source, idea, tone: tone || undefined } });
       setTitle(d.title);
       setPremise(d.premise);
       setCharacters(d.characters);
@@ -74,6 +76,7 @@ function Stories() {
           characters: characters.filter((c) => c.name.trim()),
           opening: opening || undefined,
           playAs: playAs || undefined,
+          tone: tone || undefined,
         },
       });
       if (res.held) toast.info(HELD_MESSAGE);
@@ -116,6 +119,30 @@ function Stories() {
 
       {open ? (
         <section aria-label="Start a story" className="glass-card space-y-3 rounded-2xl p-4">
+          <div className="space-y-1.5">
+            <p className="text-sm font-bold">Pick a mood</p>
+            <div role="radiogroup" aria-label="Story mood" className="flex flex-wrap gap-2">
+              {(Object.keys(STORY_TONES) as StoryTone[]).map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="radio"
+                  aria-checked={tone === key}
+                  onClick={() => setTone(tone === key ? "" : key)}
+                  className={cn(
+                    "k-focus inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-[13px] font-bold transition-colors",
+                    tone === key ? "bg-grad-primary text-white shadow-glow" : "bg-surface-alt text-ink hover:bg-violet/10",
+                  )}
+                >
+                  <span aria-hidden>{STORY_TONES[key].emoji}</span>
+                  {STORY_TONES[key].label}
+                </button>
+              ))}
+            </div>
+            <p className="text-xs text-muted">
+              {tone ? STORY_TONES[tone].guide : "Optional. It shapes how the storyteller writes every turn."}
+            </p>
+          </div>
           {ai.data?.storyteller ? (
             <div className="space-y-2 rounded-xl bg-accent/10 p-3">
               <p className="text-sm font-bold">Let the storyteller set it up</p>
@@ -274,7 +301,15 @@ function Stories() {
                   {s.status === "open" ? "Open" : "Ended"}
                 </span>
               </div>
-              {s.source ? <p className="text-xs text-subtle">Inspired by {s.source}</p> : null}
+              {s.source || s.tone ? (
+                <p className="text-xs text-subtle">
+                  {s.tone && s.tone in STORY_TONES
+                    ? `${STORY_TONES[s.tone as StoryTone].emoji} ${STORY_TONES[s.tone as StoryTone].label}`
+                    : ""}
+                  {s.tone && s.source ? " · " : ""}
+                  {s.source ? `Inspired by ${s.source}` : ""}
+                </p>
+              ) : null}
               <p className="mt-2 line-clamp-3 text-sm text-muted">{s.premise}</p>
               <p className="mt-3 text-xs text-subtle">
                 {s.castCount} playing · {s.turnCount} turns

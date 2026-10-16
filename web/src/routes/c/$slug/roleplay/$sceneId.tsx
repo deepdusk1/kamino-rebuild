@@ -18,6 +18,7 @@ import {
   writeEnding,
 } from "@/lib/kamino/ai-features";
 import { HELD_MESSAGE } from "@/lib/kamino/held";
+import { STORY_TONES, type StoryTone } from "@/lib/kamino/roleplay";
 import type { RoleplayTurn } from "@/lib/kamino/types";
 import { cn, timeAgo } from "@/lib/utils";
 
@@ -70,6 +71,8 @@ function Scene() {
   const storyteller = Boolean(ai.data?.storyteller);
   const playing = Boolean(s.myCharacter);
   const open = s.status === "open";
+  const mood = s.tone && s.tone in STORY_TONES ? STORY_TONES[s.tone as StoryTone] : null;
+  const myMove = open && playing && s.spotlight === s.myCharacter;
 
   return (
     <div className="space-y-5 px-4 py-5">
@@ -82,7 +85,13 @@ function Scene() {
       </Link>
       <header>
         <h2 className="font-display text-2xl font-semibold">{s.title}</h2>
-        {s.source ? <p className="text-xs text-subtle">Inspired by {s.source}</p> : null}
+        {s.source || mood ? (
+          <p className="text-xs text-subtle">
+            {mood ? `${mood.emoji} ${mood.label}` : ""}
+            {mood && s.source ? " · " : ""}
+            {s.source ? `Inspired by ${s.source}` : ""}
+          </p>
+        ) : null}
         <p className="mt-2 text-sm text-muted">{s.premise}</p>
         {!open ? (
           <p className="mt-2 text-sm font-bold text-muted">
@@ -163,6 +172,21 @@ function Scene() {
         {!s.turns.length ? <li className="text-sm text-muted">Nothing has happened yet.</li> : null}
       </ol>
       <div ref={endRef} />
+
+      {open && s.spotlight ? (
+        <p
+          role="status"
+          className={cn(
+            "flex items-center gap-2 rounded-2xl px-4 py-3 text-sm font-bold",
+            myMove ? "bg-grad-primary text-white shadow-glow" : "bg-surface-alt text-muted",
+          )}
+        >
+          <span aria-hidden>{myMove ? "🎯" : "⏳"}</span>
+          {myMove
+            ? `Your move, ${s.myCharacter}! The story just turned to you.`
+            : `The story turned to ${s.spotlight}. Anyone in the cast can still jump in.`}
+        </p>
+      ) : null}
 
       {open && playing ? (
         <section aria-label="Your turn" className="glass-card space-y-2 rounded-2xl p-4">

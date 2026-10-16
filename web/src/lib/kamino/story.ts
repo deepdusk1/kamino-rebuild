@@ -84,7 +84,7 @@ export const proposeAiStoryBranches = createServerFn({ method: "POST" })
   .handler(async ({ context, data }): Promise<StoryBranches> => {
     const sql = await internals.db();
     const { userId } = context as Authed;
-    const { loadScene, requireScenePlay, turnsForPrompt } = storyHelpers();
+    const { loadScene, promptScene, requireScenePlay, turnsForPrompt } = storyHelpers();
     const scene = await loadScene(sql, data.sceneId);
     await requireScenePlay(sql, userId, scene.row.community_id);
     if (!isOpen(scene)) throw new Error("This story has ended.");
@@ -94,7 +94,7 @@ export const proposeAiStoryBranches = createServerFn({ method: "POST" })
       await guard(userId, "ai");
       const turns = await turnsForPrompt(sql, scene.row.id);
       const cast = scene.cast.map((c) => ({ name: c.character_name, player: c.user_id }));
-      const header = { title: scene.row.title, source: scene.row.source, premise: scene.row.premise, characters: scene.characters };
+      const header = await promptScene(sql, scene);
       let reply: string;
       try {
         reply = await chatComplete(sql, branchPrompt(header, cast, turns), { maxTokens: 220 });

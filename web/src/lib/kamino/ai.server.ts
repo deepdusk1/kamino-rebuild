@@ -24,8 +24,11 @@ export type AiConfig = {
 
 const trimSlash = (url: string) => url.replace(/\/+$/, "");
 
-/** Free models tried in this order. Each has its own daily allowance on Groq, so two models roughly double the day. */
-export const DEFAULT_CHAT_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+/**
+ * Free models tried in this order. Each has its own daily allowance on Groq, so two models roughly double the day.
+ * The bigger model goes first: it writes far richer, less generic stories; the small one takes over when it is busy.
+ */
+export const DEFAULT_CHAT_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"];
 const DEFAULT_DAILY_LIMIT = 300;
 
 export function aiConfigFrom(env: Env): AiConfig {

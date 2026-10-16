@@ -18,11 +18,14 @@ import {
   STORYTELLER_ENDING_TOKENS,
   STORYTELLER_NARRATION_TOKENS,
   checkScene,
+  checkTone,
   cleanReply,
   draftPrompt,
   endingPrompt,
   narrationPrompt,
   parseDraft,
+  pickSpotlight,
+  splitNotes,
   type SceneCharacter,
   type TurnForPrompt,
 } from "./roleplay";
@@ -216,6 +219,9 @@ type SceneRow = {
   created_at: string;
   updated_at: string;
   held: boolean;
+  tone: string;
+  notes: string;
+  spotlight: string;
 };
 
 async function loadScene(sql: Sql, sceneId: number) {
@@ -271,23 +277,20 @@ async function storytellerWrites(
 ): Promise<number> {
   const turns = await turnsForPrompt(sql, scene.row.id);
   const cast = scene.cast.map((c) => ({ name: c.character_name, player: c.user_id }));
-  const header = {
-    title: scene.row.title,
-    source: scene.row.source,
-    premise: scene.row.premise,
-    characters: scene.characters,
-  };
+  const header = await promptScene(sql, scene);
   const messages =
     kind === "ending"
       ? endingPrompt(header, cast, turns, extra)
       : narrationPrompt(header, cast, turns, extra);
-  const text = cleanReply(
-    await chatComplete(
-      sql,
-      messages,
-      { maxTokens: kind === "ending" ? STORYTELLER_ENDING_TOKENS : STORYTELLER_NARRATION_TOKENS },
-    ),
+  const reply = await chatComplete(
+    sql,
+    messages,
+    { maxTokens: kind === "ending" ? STORYTELLER_ENDING_TOKENS : STORYTELLER_NARRATION_TOKENS },
   );
+  // Narration ends with the storyteller's private notes; members only see the story part.
+  const { story, notes } = kind === "narration" ? splitNotes(reply) : { story: reply, notes: "" };
+  const text = cleanReply(story);
+  if (!text) throw new AiUnavailableError("The AI storyteller had nothing to say. Try again.");
   const inserted = await sql<{ id: number }>`
     insert into roleplay_turns (scene_id, author_user_id, character_name, kind, body)
     values (${scene.row.id}, ${null}, ${""}, ${kind}, ${text}) returning id
@@ -306,8 +309,35 @@ async function storytellerWrites(
     },
     notify,
   );
-  await sql`update roleplay_scenes set updated_at = now() where id = ${scene.row.id}`;
+  // Remember the new notes (kept when the reply had none) and who the story just turned to.
+  const spotlight = kind === "narration" ? (pickSpotlight(scene.characters, cast, turns) ?? "") : "";
+  await sql`update roleplay_scenes set updated_at = now(),
+    notes = case when ${notes} = '' then notes else ${notes} end,
+    spotlight = ${spotlight}
+    where id = ${scene.row.id}`;
   return id;
+}
+
+/**
+ * Everything the storyteller should know about a scene besides the recent turns: the mood, its private notes, how
+ * the story began and how far along it is.
+ */
+async function promptScene(sql: Sql, scene: Awaited<ReturnType<typeof loadScene>>) {
+  const firstAndCount = (
+    await sql<{ opening: string | null; progress: number }>`
+      select (select body from roleplay_turns where scene_id = ${scene.row.id} and kind = 'narration' and held = false and rewound_at is null order by id limit 1) as opening,
+        (select count(*)::int from roleplay_turns where scene_id = ${scene.row.id} and held = false and rewound_at is null) as progress`
+  )[0];
+  return {
+    title: scene.row.title,
+    source: scene.row.source,
+    premise: scene.row.premise,
+    characters: scene.characters,
+    tone: scene.row.tone ?? "",
+    notes: scene.row.notes ?? "",
+    opening: firstAndCount?.opening ?? "",
+    progress: Number(firstAndCount?.progress ?? 0),
+  };
 }
 
 /** Runs the storyteller but never lets its failure undo what the member did; returns a message to show instead. */
@@ -335,6 +365,7 @@ function summaryOf(row: Record<string, unknown>): RoleplaySceneSummary {
     endingCount: Number(row.ending_count ?? 0),
     creatorName: String(row.creator_name ?? "Member"),
     updatedAt: iso(row.updated_at),
+    tone: checkTone(row.tone),
   };
 }
 
@@ -434,6 +465,11 @@ export const getScene = createServerFn({ method: "GET" })
       })),
       turns,
       myCharacter: scene.cast.find((c) => c.user_id === userId)?.character_name ?? null,
+      // Only a character someone still plays can be "on the spot".
+      spotlight:
+        scene.row.status === "open" && scene.cast.some((c) => c.character_name === scene.row.spotlight)
+          ? scene.row.spotlight
+          : null,
       canManage: Boolean(
         userId &&
         (userId === scene.row.creator_id || (m?.status === "active" && canModerate(m.role))),
@@ -445,7 +481,7 @@ export const getScene = createServerFn({ method: "GET" })
 /** The AI storyteller sets up a whole story from a short idea. Nothing is saved; the creator can edit it first. */
 export const draftScene = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { slug: string; source?: string; idea: string }) => d)
+  .validator((d: { slug: string; source?: string; idea: string; tone?: string }) => d)
   .handler(async ({ context, data }) => {
     const sql = await db();
     const { userId } = context as Authed;
@@ -455,8 +491,9 @@ export const draftScene = createServerFn({ method: "POST" })
     if (idea.length < 5) throw new Error("Describe your idea in a few words first.");
     const err = scanText(`${data.source ?? ""}\n${idea}`);
     if (err) throw new Error(err);
-    const reply = await chatComplete(sql, draftPrompt(String(data.source ?? ""), idea), {
-      maxTokens: 900,
+    const tone = checkTone(data.tone);
+    const reply = await chatComplete(sql, draftPrompt(String(data.source ?? ""), idea, tone), {
+      maxTokens: 1100,
     }).catch((error: unknown) => {
       throw error instanceof AiUnavailableError ? new Error(error.message) : error;
     });
@@ -465,6 +502,7 @@ export const draftScene = createServerFn({ method: "POST" })
         .trim()
         .slice(0, 80),
       ...parseDraft(reply),
+      tone,
     };
   });
 
@@ -483,6 +521,7 @@ export const createScene = createServerFn({ method: "POST" })
       characters: SceneCharacter[];
       opening?: string;
       playAs?: string;
+      tone?: string;
     }) => d,
   )
   .handler(async ({ context, data }) => {
@@ -496,8 +535,8 @@ export const createScene = createServerFn({ method: "POST" })
     );
     if (err) throw new Error(err);
     const created = await sql<{ id: number }>`
-      insert into roleplay_scenes (community_id, creator_id, title, source, premise, characters)
-      values (${data.slug}, ${userId}, ${scene.title}, ${scene.source}, ${scene.premise}, ${JSON.stringify(scene.characters)})
+      insert into roleplay_scenes (community_id, creator_id, title, source, premise, characters, tone)
+      values (${data.slug}, ${userId}, ${scene.title}, ${scene.source}, ${scene.premise}, ${JSON.stringify(scene.characters)}, ${scene.tone})
       returning id
     `;
     const sceneId = Number(created[0]!.id);
@@ -734,6 +773,7 @@ export const deleteScene = createServerFn({ method: "POST" })
  * by one: that would keep the AI service (ai.server) in the website's browser bundle, which the build refuses.
  */
 export const storyHelpers = createServerOnlyFn(() => ({
+  promptScene,
   loadScene,
   requireSceneRead,
   requireScenePlay,
