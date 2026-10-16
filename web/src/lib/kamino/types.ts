@@ -509,6 +509,8 @@ export type RoleplaySceneSummary = {
   endingCount: number;
   creatorName: string;
   updatedAt: string;
+  /** Mood picked at set-up ("adventure", "mystery", …) or "" for none. */
+  tone: string;
 };
 
 export type RoleplayTurn = {
@@ -527,6 +529,8 @@ export type RoleplayScene = RoleplaySceneSummary & {
   turns: RoleplayTurn[];
   /** The character the viewer plays, or null. */
   myCharacter: string | null;
+  /** The character the storyteller turned to last ("your move"), or null. */
+  spotlight: string | null;
   /** The viewer may end or delete the scene (its creator or a moderator). */
   canManage: boolean;
   canPlay: boolean;

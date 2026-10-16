@@ -9,6 +9,7 @@ import { Button, Card, Chip, EmptyState, ErrorState, Field, Loading, Screen, She
 import { useAction } from "@/lib/errors";
 import { timeAgo } from "@/lib/format";
 import { tellIfHeld } from "@/lib/held";
+import { STORY_TONES, TONE_KEYS, toneLabel, type StoryTone } from "@/lib/story-tones";
 import { space, useTheme } from "@/theme";
 
 type CharacterDraft = { name: string; description: string };
@@ -31,9 +32,10 @@ function Stories() {
   const [characters, setCharacters] = useState<CharacterDraft[]>([{ name: "", description: "" }]);
   const [opening, setOpening] = useState("");
   const [playAs, setPlayAs] = useState("");
+  const [tone, setTone] = useState<StoryTone | "">("");
 
   const [draft, drafting] = useAction(async () => {
-    const d = await api.draftScene(slug!, idea, source);
+    const d = await api.draftScene(slug!, idea, source, tone || undefined);
     setTitle(d.title);
     setPremise(d.premise);
     setCharacters(d.characters);
@@ -43,7 +45,7 @@ function Stories() {
 
   const named = characters.filter((c) => c.name.trim());
   const [create, creating] = useAction(async () => {
-    const res = await api.createScene({ slug: slug!, title, source, premise, characters: named, opening: opening || undefined, playAs: playAs || undefined });
+    const res = await api.createScene({ slug: slug!, title, source, premise, characters: named, opening: opening || undefined, playAs: playAs || undefined, tone: tone || undefined });
     tellIfHeld(res);
     if (res.aiError) Alert.alert("Storyteller", res.aiError);
     setOpen(false);
@@ -68,7 +70,11 @@ function Stories() {
             <Txt variant="heading" numberOfLines={1} style={{ flex: 1 }}>{s.title}</Txt>
             <Chip label={s.status === "open" ? "Open" : "Ended"} tone={s.status === "open" ? "ok" : "default"} />
           </View>
-          {s.source ? <Txt variant="caption" tone="subtle">Inspired by {s.source}</Txt> : null}
+          {s.source || toneLabel(s.tone) ? (
+            <Txt variant="caption" tone="subtle">
+              {[toneLabel(s.tone), s.source ? `Inspired by ${s.source}` : ""].filter(Boolean).join(" · ")}
+            </Txt>
+          ) : null}
           <Txt tone="muted" numberOfLines={3}>{s.premise}</Txt>
           <Txt variant="caption" tone="subtle">
             {s.castCount} playing · {s.turnCount} turns{s.endingCount ? ` · ${s.endingCount} endings` : ""} · {timeAgo(s.updatedAt)}
@@ -80,6 +86,20 @@ function Stories() {
       ) : null}
 
       <Sheet visible={open} title="New story" onClose={() => setOpen(false)}>
+        <View style={{ gap: space.sm }}>
+          <Txt variant="label" tone="subtle">Pick a mood</Txt>
+          <View accessibilityRole="radiogroup" accessibilityLabel="Story mood" style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+            {TONE_KEYS.map((key) => (
+              <Chip
+                key={key}
+                label={`${STORY_TONES[key].emoji} ${STORY_TONES[key].label}`}
+                selected={tone === key}
+                onPress={() => setTone(tone === key ? "" : key)}
+              />
+            ))}
+          </View>
+          <Txt variant="caption" tone="muted">{tone ? STORY_TONES[tone].guide : "Optional. It shapes how the storyteller writes every turn."}</Txt>
+        </View>
         {ai.data?.storyteller ? (
           <Card>
             <Txt variant="heading">Let the storyteller set it up</Txt>

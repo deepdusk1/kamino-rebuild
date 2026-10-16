@@ -175,10 +175,10 @@ export const api = {
     rpc<{ ok: boolean; status: string }>("reviewSafetyFlag", { id, decision }),
   scenes: (slug: string) => rpc<RoleplaySceneSummary[]>("listScenes", { slug }),
   scene: (sceneId: number) => rpc<RoleplayScene>("getScene", { sceneId }),
-  draftScene: (slug: string, idea: string, source?: string) =>
-    rpc<{ source: string; title: string; premise: string; characters: { name: string; description: string }[]; opening: string }>("draftScene", { slug, idea, source }),
+  draftScene: (slug: string, idea: string, source?: string, tone?: string) =>
+    rpc<{ source: string; title: string; premise: string; characters: { name: string; description: string }[]; opening: string; tone: string }>("draftScene", { slug, idea, source, tone }),
   createScene: (input: {
-    slug: string; title: string; source?: string; premise: string; characters: { name: string; description: string }[]; opening?: string; playAs?: string;
+    slug: string; title: string; source?: string; premise: string; characters: { name: string; description: string }[]; opening?: string; playAs?: string; tone?: string;
   }) => rpc<{ id: number; held: boolean; aiError: string | null }>("createScene", input),
   joinScene: (sceneId: number, character: string) => rpc<{ character: string }>("joinScene", { sceneId, character }),
   leaveScene: (sceneId: number) => rpc<{ ok: boolean }>("leaveScene", { sceneId }),

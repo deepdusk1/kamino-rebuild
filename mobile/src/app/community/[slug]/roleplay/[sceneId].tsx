@@ -9,7 +9,8 @@ import { StoryVote } from "@/components/community/StoryVote";
 import { Avatar, Button, Card, Chip, ErrorState, Field, Loading, Screen, Txt } from "@/components/ui";
 import { useAction } from "@/lib/errors";
 import { tellIfHeld } from "@/lib/held";
-import { radius, space, useTheme } from "@/theme";
+import { spotlightLine, toneLabel } from "@/lib/story-tones";
+import { font, radius, space, useTheme } from "@/theme";
 
 /** One role-play story: the cast, the story so far, and (for its players) the turn box and storyteller buttons. */
 function Scene() {
@@ -80,11 +81,16 @@ function Scene() {
   const myId = me.data?.profile.userId;
   const isOpen = s.status === "open";
   const busy = playing || continuing || endingBusy || joining;
+  const turnBanner = spotlightLine(s.spotlight, s.myCharacter, isOpen);
 
   return (
     <Screen refreshing={q.isRefetching} onRefresh={() => void q.refetch()}>
       <Stack.Screen options={{ title: s.title }} />
-      {s.source ? <Txt variant="caption" tone="subtle">Inspired by {s.source}</Txt> : null}
+      {s.source || toneLabel(s.tone) ? (
+        <Txt variant="caption" tone="subtle">
+          {[toneLabel(s.tone), s.source ? `Inspired by ${s.source}` : ""].filter(Boolean).join(" · ")}
+        </Txt>
+      ) : null}
       <Txt tone="muted">{s.premise}</Txt>
       {!isOpen ? <Chip label="This story has ended" /> : null}
 
@@ -122,6 +128,27 @@ function Scene() {
         <TurnView key={t.id} turn={t} onRewind={s.canManage && isOpen && i < s.turns.length - 1 ? () => askRewind(t.id) : undefined} />
       ))}
       {!s.turns.length ? <Txt tone="muted">Nothing has happened yet.</Txt> : null}
+
+      {turnBanner ? (
+        <View
+          accessibilityRole="text"
+          accessibilityLiveRegion="polite"
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: space.sm,
+            paddingHorizontal: 14,
+            paddingVertical: 12,
+            borderRadius: radius.card,
+            backgroundColor: turnBanner.mine ? theme.accent : theme.surfaceAlt,
+          }}
+        >
+          <Txt>{turnBanner.mine ? "🎯" : "⏳"}</Txt>
+          <Txt variant="small" style={{ flex: 1, fontFamily: font.bold, color: turnBanner.mine ? "#ffffff" : theme.muted }}>
+            {turnBanner.text}
+          </Txt>
+        </View>
+      ) : null}
 
       {/* Voting on the next direction sits right under the story, where everyone reads it. */}
       {isOpen && storyteller ? <StoryVote sceneId={id} onStoryChanged={() => void q.refetch()} /> : null}
