@@ -353,7 +353,7 @@ export function CommentBar({
   return (
     <form onSubmit={submit} className={cn("flex items-center gap-2.5", className)}>
       {me && <Avatar person={me} size={30} />}
-      <div className="flex h-10 min-w-0 flex-1 items-center rounded-full bg-surface-alt pr-1 pl-3.5 focus-within:ring-2 focus-within:ring-violet">
+      <div className="flex h-10 min-w-0 flex-1 items-center rounded-full border border-transparent bg-surface-alt pr-1 pl-3.5 transition-colors focus-within:border-violet/35 focus-within:bg-surface">
         <label htmlFor={id} className="sr-only">
           Write a comment
         </label>

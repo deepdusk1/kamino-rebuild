@@ -4,8 +4,8 @@ import { Newspaper, Sparkles, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
-import { HomeToolsStrip } from '@/components/platform-tools';
-import { TutorialPrompt } from '@/components/tutorial-prompt';
+import { HomeShortcuts } from "@/components/home/home-shortcuts";
+import { TutorialPrompt } from "@/components/tutorial-prompt";
 import { afterCheckIn, eventWhen, patchPages, uniqueById, wasOnboardingShown } from "@/components/home/home-data";
 import { CommunityRow, CreatorRow, HomeSection, HomeSkeleton, StreakAndEvent } from "@/components/home/home-sections";
 import { WelcomeScreen } from "@/components/home/welcome-screen";
@@ -378,8 +378,9 @@ function Home({ userId, onboardedAt, initial }: { userId: string; onboardedAt: s
           )}
         </section>
       </div>
-          <div className="mt-6 space-y-3 px-4">
-        <HomeToolsStrip />
+      {/* End of Home: shortcuts back into chats, rooms and events, your tools, and the welcome tour. */}
+      <div className="mt-7 flex flex-col gap-5 px-4 pb-8 lg:mt-10 lg:gap-7">
+        <HomeShortcuts />
         <TutorialPrompt />
       </div>
     </AppShell>

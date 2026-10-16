@@ -54,6 +54,16 @@ import { font, space, useTheme } from "@/theme";
 void SplashScreen.preventAutoHideAsync();
 configureForegroundNotifications();
 
+// Web build only: browsers draw their own square focus box inside our rounded text fields (the chat
+// box, search, comments). Every field already shows focus with its own soft border, so turn the
+// browser's box off for text fields. Native apps never draw it.
+if (Platform.OS === "web" && typeof document !== "undefined" && !document.getElementById("kamino-field-focus")) {
+  const style = document.createElement("style");
+  style.id = "kamino-field-focus";
+  style.textContent = "input:focus,input:focus-visible,textarea:focus,textarea:focus-visible{outline:none}";
+  document.head.appendChild(style);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

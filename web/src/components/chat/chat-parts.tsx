@@ -601,7 +601,7 @@ export function ChatInputBar({
                 />
               </button>
             ) : null}
-            <div className="flex min-h-10 min-w-0 flex-1 items-end rounded-[20px] bg-surface-alt pr-1 pl-3.5 focus-within:ring-2 focus-within:ring-violet">
+            <div className="flex min-h-10 min-w-0 flex-1 items-end rounded-[20px] border border-transparent bg-surface-alt pr-1 pl-3.5 transition-colors focus-within:border-violet/35 focus-within:bg-surface">
               <textarea
                 ref={box}
                 value={value}
