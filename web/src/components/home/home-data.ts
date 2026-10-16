@@ -78,3 +78,104 @@ export function wasOnboardingShown(userId: string): boolean {
     return false;
   }
 }
+
+/** One "Jump back in" card on Home. */
+export type HubShortcut = {
+  key: string;
+  /** Small label above the title: "Chat", "Upcoming", "Visited", "Live · 3 listening". */
+  kind: string;
+  title: string;
+  icon: "live" | "chat" | "event" | "community";
+  tone: "violet" | "blue" | "pink" | "green";
+  href: string;
+  live: boolean;
+  /** For direct chats: the other person, so the card shows their face. */
+  person: AvatarPerson | null;
+  /** ISO time of the latest activity, when known (chats and events). */
+  at: string | null;
+};
+
+type HubRow = Record<string, unknown>;
+const PER_KIND = 3;
+
+function isoOrNull(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  const t = new Date(value as string).getTime();
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+/**
+ * Turns the discovery hub into "Jump back in" cards: live rooms first, then your chats, upcoming
+ * events and communities you visited. At most three of each, rows without an id are skipped, and a
+ * live room that is also one of your chats shows once. Same rules as the phone app's JumpBackIn.
+ */
+export function hubShortcuts(
+  hub: { live?: HubRow[]; chats?: HubRow[]; events?: HubRow[]; visits?: HubRow[] } | undefined,
+): HubShortcut[] {
+  if (!hub) return [];
+  const list: HubShortcut[] = [];
+  const seen = new Set<string>();
+  const add = (rows: HubRow[] | undefined, prefix: string, make: (r: HubRow) => Omit<HubShortcut, "key"> | null) => {
+    for (const r of (rows ?? []).slice(0, PER_KIND)) {
+      if (r.id === null || r.id === undefined || r.id === "") continue;
+      const item = make(r);
+      if (!item || seen.has(item.href)) continue;
+      seen.add(item.href);
+      list.push({ key: `${prefix}-${String(r.id)}`, ...item });
+    }
+  };
+  add(hub.live, "live", (r) => {
+    const listeners = Number(r.listeners) || 0;
+    return {
+      kind: listeners > 0 ? `Live · ${listeners} listening` : "Live now",
+      title: String(r.name || "Live room"),
+      icon: "live",
+      tone: "pink",
+      href: `/chats/${String(r.id)}`,
+      live: true,
+      person: null,
+      at: null,
+    };
+  });
+  add(hub.chats, "chat", (r) => {
+    const dm = r.is_dm === true && typeof r.peer_user_id === "string";
+    const title = String(r.name || "Chat");
+    return {
+      kind: dm ? "Message" : "Chat",
+      title,
+      icon: "chat",
+      tone: "violet",
+      href: `/chats/${String(r.id)}`,
+      live: false,
+      person: dm
+        ? { name: title, hue: Number(r.peer_hue) || 262, userId: String(r.peer_user_id), avatarV: Number(r.peer_avatar_v) || 0 }
+        : null,
+      at: isoOrNull(r.latest),
+    };
+  });
+  add(hub.events, "event", (r) =>
+    r.community_id
+      ? {
+          kind: "Upcoming",
+          title: String(r.title || "Event"),
+          icon: "event",
+          tone: "blue",
+          href: `/c/${String(r.community_id)}/events`,
+          live: false,
+          person: null,
+          at: isoOrNull(r.starts_at),
+        }
+      : null,
+  );
+  add(hub.visits, "visit", (r) => ({
+    kind: "Visited",
+    title: String(r.name || "Community"),
+    icon: "community",
+    tone: "green",
+    href: `/c/${String(r.id)}`,
+    live: false,
+    person: null,
+    at: null,
+  }));
+  return list;
+}

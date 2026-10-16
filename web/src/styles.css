@@ -300,9 +300,22 @@
   }
 }
 
-:focus-visible {
-  outline: 2px solid var(--color-violet);
-  outline-offset: 3px;
+/*
+ * Default keyboard focus ring. It lives in the base layer so a component's own focus style
+ * (outline-none, a ring on its wrapper, k-focus) wins. Unlayered, it beat every utility and
+ * drew a square box inside rounded text fields such as the chat composer whenever they were tapped.
+ */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--color-violet);
+    outline-offset: 3px;
+  }
+  /* Text fields show focus with their own border or ring; an offset outline looks detached. */
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline-offset: 0;
+  }
 }
 
 .font-display {

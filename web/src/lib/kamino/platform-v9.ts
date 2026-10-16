@@ -248,7 +248,10 @@ export const getDiscoveryHub = createServerFn({ method: "GET" })
       try {
         const accessible = await internals.requireRoomAccess(sql, userId, Number(row.id));
         const labeled = await internals.attachPeer(sql, accessible, userId);
-        chats.push({...row,name:labeled.kind==='dm'?labeled.peerName??'Direct conversation':labeled.name});
+        // Direct chats also carry the other person's picture so Home can show their face.
+        chats.push({...row,name:labeled.kind==='dm'?labeled.peerName??'Direct conversation':labeled.name,
+          is_dm:labeled.kind==='dm',peer_user_id:labeled.kind==='dm'?labeled.peerUserId:null,
+          peer_hue:labeled.kind==='dm'?labeled.peerHue:null,peer_avatar_v:labeled.kind==='dm'?labeled.peerAvatarV:0});
       } catch { /* Access can change after membership, age, privacy or block updates. */ }
     }
     const live = await sql.query<Row>(
