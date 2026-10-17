@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { getLiveStage } from '@/lib/kamino/community-v9';
 import { missedCall, ringCall } from '@/lib/kamino/server';
 import { getLiveKitJoin, getRoomRecordingState } from '@/lib/kamino/livekit';
+import { CALL_PHASE_TEXT, CONNECT_TIMEOUT_MS, TROUBLE_HELP, callPhase } from "@/lib/kamino/call-status";
 import { useServerEventsLive } from '@/lib/server-events';
 
 type WatchWire = {
@@ -249,6 +250,8 @@ export function LiveStage({
   const [elapsed, setElapsed] = useState(0);
   /** DM call rang unanswered: nobody joined within the ring window. */
   const [noAnswer, setNoAnswer] = useState(false);
+  /** Someone answered, but the call could not link up between the two networks. */
+  const [trouble, setTrouble] = useState(false);
   const localRef = useRef<MediaStream | null>(null);
   const previewRef = useRef<HTMLVideoElement>(null);
   const startedAt = useRef<number>(0);
@@ -292,6 +295,7 @@ export function LiveStage({
   async function joinCall(withCam = false) {
     setErr(null);
     setNoAnswer(false);
+    setTrouble(false);
     try {
       const current=kind==='dm'?null:await getLiveStage({data:{roomId}});
       const self=current?.participants.find(p=>p.userId===userId);
@@ -381,6 +385,7 @@ export function LiveStage({
     setCam(false);
     setMinimized(false);
     setNoAnswer(false);
+    setTrouble(false);
     onVoice?.(false);
     // Let the header's call button (or an answered call) start a new call later.
     autoStarted.current = false;
@@ -453,11 +458,14 @@ export function LiveStage({
 
   useEffect(() => {
     function onAnswer(e: Event) {
-      const id = Number((e as CustomEvent).detail);
+      // The detail is the room id, or { roomId, video } for a video call from the chat header.
+      const detail = (e as CustomEvent).detail as number | { roomId: number; video?: boolean };
+      const id = Number(typeof detail === "object" && detail ? detail.roomId : detail);
+      const video = typeof detail === "object" && detail ? Boolean(detail.video) : false;
       if (id !== roomId) return;
       if (onCall || autoStarted.current) return;
       autoStarted.current = true;
-      void joinCall(false);
+      void joinCall(video);
     }
     window.addEventListener(KAMINO_CALL_EVENT, onAnswer);
     return () => window.removeEventListener(KAMINO_CALL_EVENT, onAnswer);
@@ -474,6 +482,9 @@ export function LiveStage({
   }, [onCall]);
 
   const connectedNow = live.peers.filter((p) => p.connectionState === "connected").length;
+  // Someone else is in the call (they answered), even if the audio has not linked up yet.
+  const joinedNow = liveKit ? Object.keys(liveKitStreams).length : live.peers.length;
+  const linkFailed = !liveKit && live.peers.length > 0 && live.peers.every((p) => p.connectionState === "failed");
 
   // DM calls ring for 30s: if nobody joins, show "No answer" instead of "Calling…" forever.
   // (The callee's incoming-call overlay only appears while their app is open, so unanswered
@@ -482,10 +493,25 @@ export function LiveStage({
   // so "answered" comes from subscribed remote SFU tracks instead of P2P connection state.
   useEffect(() => {
     if (kind !== "dm" || !onCall || noAnswer) return;
-    if (liveKit ? Object.keys(liveKitStreams).length > 0 : connectedNow > 0) return;
+    // Answered (even if still linking up) is never a missed call.
+    if (joinedNow > 0 || connectedNow > 0) return;
     const t = window.setTimeout(() => setNoAnswer(true), 30_000);
     return () => window.clearTimeout(t);
-  }, [kind, onCall, liveKit, liveKitStreams, connectedNow, noAnswer]);
+  }, [kind, onCall, connectedNow, joinedNow, noAnswer]);
+
+  // Answered but not linked up: give it CONNECT_TIMEOUT_MS, then say it could not connect (instead of "Calling…").
+  useEffect(() => {
+    if (!onCall || connectedNow > 0 || joinedNow === 0) {
+      if (trouble && connectedNow > 0) setTrouble(false);
+      return;
+    }
+    if (linkFailed) {
+      setTrouble(true);
+      return;
+    }
+    const t = window.setTimeout(() => setTrouble(true), CONNECT_TIMEOUT_MS);
+    return () => window.clearTimeout(t);
+  }, [onCall, connectedNow, joinedNow, linkFailed, trouble]);
 
   // WhatsApp-style record keeping: an unanswered DM call leaves "Missed call" in the
   // conversation (server de-duplicates), and a decline by the other side ends the call.
@@ -514,6 +540,7 @@ export function LiveStage({
   // In LiveKit mode the P2P mesh may never link (strict NAT) while SFU media flows fine,
   // so connectedness comes from subscribed remote SFU tracks instead of P2P connection state.
   const connected = liveKit ? Object.keys(liveKitStreams).length : connectedNow;
+  const phase = callPhase({ connected, joined: joinedNow, noAnswer, trouble });
   const failed = live.peers.filter((p) => p.connectionState === "failed");
   const otherName = live.peers[0]?.name ?? peerName ?? "Member";
   const otherHue = peerHue ?? 265;
@@ -626,7 +653,7 @@ export function LiveStage({
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm font-extrabold">{otherName}</span>
             <span className="text-xs text-muted tabular-nums">
-              {connected ? formatElapsed(elapsed) : noAnswer ? "No answer" : "Calling…"}
+              {connected ? formatElapsed(elapsed) : CALL_PHASE_TEXT[phase]}
             </span>
           </span>
           <span className="rounded-full bg-green-strong px-3 py-1 text-xs font-bold text-white">
@@ -662,7 +689,7 @@ export function LiveStage({
                 <div className="rounded-full bg-surface/70 px-4 py-1.5 text-center shadow-card">
                   <p className="text-sm font-extrabold text-ink">{otherName}</p>
                   <p className="text-xs font-bold text-green-ink tabular-nums">
-                    {connected ? formatElapsed(elapsed) : noAnswer ? "No answer" : "Calling…"}
+                    {connected ? formatElapsed(elapsed) : CALL_PHASE_TEXT[phase]}
                   </p>
                 </div>
                 <span className="size-11" />
@@ -676,9 +703,12 @@ export function LiveStage({
                     <p className="text-2xl font-extrabold tracking-[-0.02em] text-ink">
                       {otherName}
                     </p>
-                    <p className="text-sm font-bold text-muted">
-                      {connected ? "Connected" : noAnswer ? "No answer" : "Calling…"}
-                    </p>
+                    <p className="text-sm font-bold text-muted">{CALL_PHASE_TEXT[phase]}</p>
+                    {phase === "trouble" ? (
+                      <p role="alert" className="max-w-xs text-center text-sm text-muted">
+                        {TROUBLE_HELP}
+                      </p>
+                    ) : null}
                   </div>
                 </div>
               )}

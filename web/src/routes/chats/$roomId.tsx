@@ -12,6 +12,7 @@ import {
   Trash2,
   UserRound,
   Users,
+  Video,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -417,6 +418,9 @@ function Room({ roomId, userId, userName }: { roomId: number; userId: string; us
   /** Starts (or joins) the call: the call panel listens for this, just like answering an incoming call. */
   const startCall = () =>
     window.dispatchEvent(new CustomEvent(KAMINO_CALL_EVENT, { detail: roomId }));
+  /** Same, with the camera on from the start. */
+  const startVideoCall = () =>
+    window.dispatchEvent(new CustomEvent(KAMINO_CALL_EVENT, { detail: { roomId, video: true } }));
 
   if (q.isPending) return <RoomLoading />;
   if (q.error || !info)
@@ -528,6 +532,11 @@ function Room({ roomId, userId, userName }: { roomId: number; userId: string; us
             <IconButton label="Search messages" onClick={() => setSheet("search")}>
               <Search className="size-[22px]" strokeWidth={2.2} aria-hidden />
             </IconButton>
+            {liveKind === "dm" ? (
+              <IconButton label="Start a video call" onClick={startVideoCall}>
+                <Video className="size-[22px]" strokeWidth={2.2} aria-hidden />
+              </IconButton>
+            ) : null}
             {liveKind ? (
               <IconButton
                 label={info.kind === "dm" ? "Start a call" : "Join the voice call"}

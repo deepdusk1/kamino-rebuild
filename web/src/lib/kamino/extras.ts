@@ -761,6 +761,6 @@ export const getIceServers = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { userId } = context as Authed;
-    const { buildIceServers } = await import("./ice.server");
-    return buildIceServers(process.env, userId);
+    const { iceServersFor } = await import("./ice.server");
+    return iceServersFor(process.env, userId);
   });

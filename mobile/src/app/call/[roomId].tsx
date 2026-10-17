@@ -10,6 +10,7 @@ import { GradientButton, PersonAvatar, Pill } from "@/components/k";
 import { Button, Card, PressableScale, Screen, Txt } from "@/components/ui";
 import { callRoomFrom } from "@/components/IncomingCallBanner";
 import { rtcPeerId } from "@/lib/calls/ids";
+import { CALL_PHASE_TEXT, CONNECT_TIMEOUT_MS, TROUBLE_HELP, callPhase } from "@/lib/calls/call-status";
 import { useCall } from "@/lib/calls/useCall";
 import { loadWebRTC } from "@/lib/calls/webrtc";
 import { useAction } from "@/lib/errors";
@@ -75,6 +76,8 @@ export default function CallScreen() {
   const call = useCall(roomId, me.data?.profile.userId, me.data?.profile.displayName ?? "Me", answered && validRoom);
 
   const [noAnswer, setNoAnswer] = useState(false);
+  /** Someone answered, but the call could not link up between the two networks. */
+  const [trouble, setTrouble] = useState(false);
   const [callSeconds, setCallSeconds] = useState(0);
   const rangRef = useRef(false);
   const missedPosted = useRef(false);
@@ -82,6 +85,9 @@ export default function CallScreen() {
 
   const isDm = room.data?.room.kind === "dm";
   const connectedCount = call.peers.filter((p) => p.state === "connected").length;
+  // Others in the call (they answered), even if the audio has not linked up yet.
+  const joinedCount = call.peers.length;
+  const linkFailed = joinedCount > 0 && call.peers.every((p) => p.state === "failed");
   const RTCView = loadWebRTC()?.RTCView;
 
   const [ring, ringing] = useAction(async () => {
@@ -115,7 +121,8 @@ export default function CallScreen() {
 
   // Nobody picked up a 1:1 call you dialled within 30 seconds: it's logged as missed in the chat.
   useEffect(() => {
-    if (mode !== "dial" || !isDm || call.status !== "active" || noAnswer || connectedCount > 0) return;
+    // Answered (even if still linking up) is never a missed call.
+    if (mode !== "dial" || !isDm || call.status !== "active" || noAnswer || connectedCount > 0 || joinedCount > 0) return;
     const timer = setTimeout(() => {
       setNoAnswer(true);
       if (!missedPosted.current) {
@@ -124,7 +131,15 @@ export default function CallScreen() {
       }
     }, NO_ANSWER_MS);
     return () => clearTimeout(timer);
-  }, [mode, isDm, call.status, connectedCount, noAnswer, roomId]);
+  }, [mode, isDm, call.status, connectedCount, joinedCount, noAnswer, roomId]);
+
+  // Answered but not linked up: give it CONNECT_TIMEOUT_MS, then say it could not connect (instead of "Ringing…").
+  useEffect(() => {
+    if (call.status !== "active" || joinedCount === 0 || connectedCount > 0 || trouble) return;
+    const timer = setTimeout(() => setTrouble(true), CONNECT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [call.status, connectedCount, joinedCount, trouble]);
+  const cantConnect = connectedCount === 0 && joinedCount > 0 && (trouble || linkFailed);
 
   // Ring and vibrate while an incoming call waits for an answer.
   useEffect(() => {
@@ -214,7 +229,9 @@ export default function CallScreen() {
             ? `Connected · ${timer}`
             : call.status === "joining"
               ? "Connecting…"
-              : noAnswer
+              : joinedCount > 0
+                ? CALL_PHASE_TEXT[callPhase({ connected: connectedCount, joined: joinedCount, noAnswer, trouble: cantConnect })]
+                : noAnswer
                 ? "No answer"
                 : isDm && mode === "dial"
                   ? "Ringing…"
@@ -288,7 +305,16 @@ export default function CallScreen() {
         </View>
       ) : null}
 
-      {noAnswer && connectedCount === 0 && !ended ? (
+      {cantConnect && !ended ? (
+        <Card style={{ backgroundColor: theme.tints.orange }}>
+          <Txt style={{ fontFamily: font.bold, color: theme.toneText.orange }}>{CALL_PHASE_TEXT.trouble}</Txt>
+          <Txt variant="small" style={{ color: theme.text }}>
+            {TROUBLE_HELP}
+          </Txt>
+        </Card>
+      ) : null}
+
+      {noAnswer && connectedCount === 0 && joinedCount === 0 && !ended ? (
         <Card style={{ backgroundColor: theme.tints.orange }}>
           <Txt style={{ fontFamily: font.bold, color: theme.toneText.orange }}>No answer</Txt>
           <Txt variant="small" style={{ color: theme.text }}>
